@@ -1,0 +1,22 @@
+.gradle/
+build/
+.idea/
+.vscode/
+out/
+.project
+.settings/
+.classpath
+nbactions.xml
+nb-configuration.xml
+nbproject/
+
+# OS/editor artifacts
+.DS_Store
+*.iml
+*.swp
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+credentials.properties
