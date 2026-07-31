@@ -3,6 +3,7 @@ package dinkbingo;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import dinkbingo.BingoResponses.BoardItem;
+import dinkbingo.BingoResponses.BoardRequest;
 import dinkbingo.BingoResponses.BoardResponse;
 import dinkbingo.BingoResponses.ClaimRequest;
 import dinkbingo.BingoResponses.ClaimResponse;
@@ -63,22 +64,23 @@ public class BingoClient {
             return CompletableFuture.completedFuture(BingoBoard.EMPTY);
         }
 
-        HttpUrl url = base.newBuilder()
-            .addQueryParameter("action", "board")
-            .addQueryParameter("token", config.eventToken())
-            .addQueryParameter("rsn", rsn)
+        BoardRequest boardRequest = new BoardRequest();
+        boardRequest.setAction("board");
+        boardRequest.setToken(config.eventToken());
+        boardRequest.setRsn(rsn);
+        Request request = new Request.Builder()
+            .url(base)
+            .post(RequestBody.create(JSON, gson.toJson(boardRequest)))
             .build();
-
-        Request request = new Request.Builder().url(url).get().build();
 
         return executeWithRetry(request, BoardResponse.class).thenApply(res -> {
             if (res == null || res.getItems() == null) {
                 log.debug("Board fetch returned nothing usable");
-                return BingoBoard.EMPTY;
+                return null;
             }
             if (res.getError() != null) {
                 log.warn("Bingo backend rejected board fetch: {}", res.getError());
-                return BingoBoard.EMPTY;
+                return null;
             }
             List<BingoItem> items = new ArrayList<>(res.getItems().size());
             for (BoardItem item : res.getItems()) {
@@ -109,7 +111,21 @@ public class BingoClient {
     // ------------------------------------------------------------------
 
     private HttpUrl parseUrl() {
-        return HttpUrl.parse(config.backendUrl().trim());
+        HttpUrl url = HttpUrl.parse(config.backendUrl().trim());
+        if (url == null) {
+            return null;
+        }
+        if (url.isHttps() || isLoopback(url.host())) {
+            return url;
+        }
+        log.warn("Bingo backend URL must use HTTPS");
+        return null;
+    }
+
+    private static boolean isLoopback(String host) {
+        return "localhost".equalsIgnoreCase(host)
+            || "127.0.0.1".equals(host)
+            || "::1".equals(host);
     }
 
     private <T> CompletableFuture<T> executeWithRetry(Request request, Class<T> type) {
@@ -120,24 +136,32 @@ public class BingoClient {
 
     private <T> void attempt(Request request, Class<T> type, int attemptNumber, CompletableFuture<T> future) {
         executor.execute(() -> {
+            if (future.isDone()) {
+                return;
+            }
             try (Response response = httpClient.newCall(request).execute()) {
                 if (response.isSuccessful()) {
                     ResponseBody body = response.body();
                     String raw = body != null ? body.string() : "";
                     try {
-                        future.complete(gson.fromJson(raw, type));
+                        T parsed = gson.fromJson(raw, type);
+                        if (isRetryable(parsed) && attemptNumber < MAX_ATTEMPTS) {
+                            retry(request, type, attemptNumber, future, "retryable backend response");
+                        } else {
+                            future.complete(parsed);
+                        }
                     } catch (JsonSyntaxException e) {
                         // Apps Script serves an HTML error page when the deployment is
-                        // misconfigured; surfacing that is far more useful than a parse trace.
+                        // misconfigured. Never log the response body because a custom backend
+                        // could reflect request credentials into it.
                         log.warn("Bingo backend returned non-JSON (check the deployment is " +
-                            "'Execute as: Me' and 'Who has access: Anyone'): {}",
-                            raw.length() > 200 ? raw.substring(0, 200) + "…" : raw);
+                            "'Execute as: Me' and 'Who has access: Anyone')");
                         future.complete(null);
                     }
                     return;
                 }
 
-                if (response.code() >= 500 && attemptNumber < MAX_ATTEMPTS) {
+                if (isRetryableHttp(response.code()) && attemptNumber < MAX_ATTEMPTS) {
                     retry(request, type, attemptNumber, future, "HTTP " + response.code());
                 } else {
                     log.warn("Bingo backend returned HTTP {}", response.code());
@@ -155,6 +179,14 @@ public class BingoClient {
                 future.complete(null);
             }
         });
+    }
+
+    private static boolean isRetryable(Object response) {
+        return response instanceof ClaimResponse && ((ClaimResponse) response).isRetryable();
+    }
+
+    private static boolean isRetryableHttp(int code) {
+        return code == 408 || code == 429 || code >= 500;
     }
 
     private <T> void retry(Request request, Class<T> type, int attemptNumber, CompletableFuture<T> future, String cause) {

@@ -93,6 +93,13 @@ class BingoAnnouncerTest {
     }
 
     @Test
+    void omitsAnInsecureWebhookOverride() {
+        when(config.bingoWebhook()).thenReturn("http://example.com/webhook");
+        announcer.announce(claim(BingoResponses.CLAIMED), "Abyssal demon");
+        assertFalse(capture().getData().containsKey("urls"));
+    }
+
+    @Test
     void doesNotAnnounceADuplicate() {
         announcer.announce(claim(BingoResponses.DUPLICATE), "Abyssal demon");
         verify(eventBus, never()).post(any());
@@ -104,18 +111,14 @@ class BingoAnnouncerTest {
         verify(eventBus, never()).post(any());
     }
 
-    /**
-     * A replay is the backend acknowledging a retry of an already-announced claim.
-     * Announcing it again is exactly the duplicate post this plugin exists to prevent.
-     */
     @Test
-    void doesNotAnnounceAReplayedClaim() {
+    void announcesAReplayReturnedToTheOriginalInFlightClaim() {
         ClaimResponse response = claim(BingoResponses.CLAIMED);
         response.setReplay(true);
 
         announcer.announce(response, "Abyssal demon");
 
-        verify(eventBus, never()).post(any());
+        assertEquals("notify", capture().getName());
     }
 
     @Test

@@ -46,9 +46,7 @@ public class BingoAnnouncer {
     }
 
     public void announce(ClaimResponse claim, String source) {
-        if (claim == null || !claim.isClaimed() || claim.isReplay()) {
-            // A replay is a retry of an already-announced claim; announcing again would be
-            // exactly the duplicate post this plugin exists to prevent.
+        if (claim == null || !claim.isClaimed()) {
             return;
         }
 
@@ -129,7 +127,7 @@ public class BingoAnnouncer {
             List<HttpUrl> urls = new ArrayList<>();
             for (String candidate : webhook.split("\n")) {
                 HttpUrl url = HttpUrl.parse(candidate.trim());
-                if (url != null) {
+                if (url != null && url.isHttps()) {
                     urls.add(url);
                 }
             }

@@ -39,7 +39,7 @@ public interface BingoConfig extends Config {
     @ConfigItem(
         keyName = "backendUrl",
         name = "Backend URL",
-        description = "The Apps Script web app URL for your event (ends in /exec).<br/>" +
+        description = "The HTTPS Apps Script web app URL for your event (ends in /exec).<br/>" +
             "Nothing is sent anywhere until this is set.",
         position = 1,
         section = connectionSection

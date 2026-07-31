@@ -5,7 +5,6 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import dinkbingo.BingoResponses.ClaimRequest;
 import dinkbingo.BingoResponses.ClaimResponse;
-import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -71,6 +70,12 @@ class BingoClientTest {
     }
 
     @Test
+    void rejectsPlainHttpExceptForLoopbackDevelopmentServers() {
+        when(config.backendUrl()).thenReturn("http://example.com/exec");
+        assertFalse(client.isConfigured());
+    }
+
+    @Test
     void fetchesAndParsesTheBoard() throws Exception {
         server.enqueue(json("{\"status\":\"ok\",\"team\":\"Team One\",\"remaining\":1,\"total\":2," +
             "\"eventOpen\":true,\"items\":[" +
@@ -88,21 +93,20 @@ class BingoClientTest {
         assertEquals("Someone", board.getById().get(21034).getClaimedBy());
 
         RecordedRequest request = server.takeRequest();
-        HttpUrl url = request.getRequestUrl();
-        assertNotNull(url);
-        assertEquals("board", url.queryParameter("action"));
-        assertEquals("secret-token", url.queryParameter("token"));
-        assertEquals("Jake", url.queryParameter("rsn"));
+        assertEquals("POST", request.getMethod());
+        JsonObject body = new JsonParser().parse(request.getBody().readUtf8()).getAsJsonObject();
+        assertEquals("board", body.get("action").getAsString());
+        assertEquals("secret-token", body.get("token").getAsString());
+        assertEquals("Jake", body.get("rsn").getAsString());
     }
 
     @Test
-    void returnsEmptyBoardWhenTheBackendRejectsTheToken() throws Exception {
+    void preservesTheCurrentBoardWhenTheBackendRejectsTheToken() throws Exception {
         server.enqueue(json("{\"status\":\"error\",\"error\":\"bad_token\",\"items\":[]}"));
 
         BingoBoard board = client.fetchBoard("Jake").get(5, TimeUnit.SECONDS);
 
-        assertEquals(BingoBoard.EMPTY.getTeam(), board.getTeam());
-        assertTrue(board.getItems().isEmpty());
+        assertNull(board);
     }
 
     @Test
@@ -123,6 +127,7 @@ class BingoClientTest {
         assertEquals(4151, body.get("itemId").getAsInt());
         assertEquals("claim-abc", body.get("claimId").getAsString());
         assertEquals("Jake", body.get("rsn").getAsString());
+        assertFalse(body.has("accountHash"), "account hashes must not leave the client");
     }
 
     @Test
@@ -155,6 +160,25 @@ class BingoClientTest {
             new JsonParser().parse(first).getAsJsonObject().get("claimId").getAsString(),
             new JsonParser().parse(second).getAsJsonObject().get("claimId").getAsString(),
             "the retry must reuse the claimId or the backend cannot deduplicate it"
+        );
+    }
+
+    @Test
+    void retriesApplicationLevelRetryableErrorsWithTheSameClaimId() throws Exception {
+        server.enqueue(json("{\"status\":\"error\",\"error\":\"lock_timeout\",\"retryable\":true}"));
+        server.enqueue(json("{\"status\":\"claimed\",\"itemId\":4151,\"remaining\":1,\"total\":2}"));
+
+        ClaimResponse response = client.submitClaim(claim()).get(15, TimeUnit.SECONDS);
+
+        assertNotNull(response);
+        assertTrue(response.isClaimed());
+        assertEquals(2, server.getRequestCount());
+
+        String first = server.takeRequest().getBody().readUtf8();
+        String second = server.takeRequest().getBody().readUtf8();
+        assertEquals(
+            new JsonParser().parse(first).getAsJsonObject().get("claimId").getAsString(),
+            new JsonParser().parse(second).getAsJsonObject().get("claimId").getAsString()
         );
     }
 
@@ -195,7 +219,6 @@ class BingoClientTest {
         claim.setQuantity(1);
         claim.setSource("Abyssal demon");
         claim.setClaimId("claim-abc");
-        claim.setAccountHash("1234");
         return claim;
     }
 
