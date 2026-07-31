@@ -127,20 +127,6 @@ class BingoAnnouncerTest {
         verify(eventBus, never()).post(any());
     }
 
-    @Test
-    void manualTestUsesTheRealScreenshotPathWithoutLookingLikeAClaim() {
-        announcer.announceTest(BingoBoard.EMPTY);
-
-        Map<String, Object> data = capture().getData();
-        assertEquals("Dink Bingo test", data.get("title"));
-        assertEquals(true, data.get("imageRequested"));
-        assertTrue(String.valueOf(data.get("text")).startsWith("[TEST]"));
-
-        @SuppressWarnings("unchecked")
-        Map<String, Object> metadata = (Map<String, Object>) data.get("metadata");
-        assertEquals(true, metadata.get("test"));
-    }
-
     // ------------------------------------------------------------------
 
     private PluginMessage capture() {

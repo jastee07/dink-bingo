@@ -25,9 +25,14 @@ the organizer-owned `Config` tab and are never returned by the API. Hiding that 
 not access control.
 
 `Leaderboard` is a formula-driven, read-only view of the authoritative tabs. Its team summary
-shows claimed tiles, points, and remaining tiles; the matrix below shows every item against
-every distinct team. A tile claimed by one team remains open for all other teams. Correct
-source data in `Items`, `Teams`, or `Claims` rather than typing over the spilled formulas.
+shows claimed tiles, earned points, remaining items, and remaining points; the matrix below
+shows every item against every distinct team. A tile claimed by one team remains open for all
+other teams. Correct source data in `Items`, `Teams`, or `Claims` rather than typing over the
+spilled formulas.
+
+After replacing `Code.gs` on an existing sheet, run `refreshLeaderboard` once from the Apps
+Script editor. It updates only the derived leaderboard formulas and formatting; it does not
+change `Items`, `Teams`, `Claims`, `Audit`, or `Config`.
 
 Re-deploy (**Deploy → Manage deployments → Edit → Version: New**) after any script edit;
 the `/exec` URL stays the same.

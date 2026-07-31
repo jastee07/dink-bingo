@@ -502,6 +502,20 @@ function setupSheet() {
 }
 
 /**
+ * Re-applies the derived leaderboard formulas and formatting without changing any source tab.
+ * Run this after updating Code.gs for an existing event sheet.
+ */
+function refreshLeaderboard() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var leaderboard = ss.getSheetByName(SHEET_LEADERBOARD);
+  if (!leaderboard) leaderboard = ss.insertSheet(SHEET_LEADERBOARD);
+  setupLeaderboard(leaderboard);
+  SpreadsheetApp.getUi().alert(
+    'Leaderboard formulas and formatting refreshed. Items, Teams, Claims, Audit, and Config were not changed.'
+  );
+}
+
+/**
  * One-time upgrade helper for sheets used before the security hardening release.
  * Redacts legacy raw audit payloads and clears the retired account_hash column.
  * Rotate token/admin_token manually after this completes.
@@ -566,23 +580,39 @@ function setupLeaderboard(sh) {
     'Read-only view derived from Items, Teams, and Claims. Make event changes on those tabs.'
   );
 
-  sh.getRange('A4:D4').setValues([['Team', 'Claimed', 'Points', 'Remaining']]);
+  sh.getRange('A4:E4').setValues([
+    ['Team', 'Claimed', 'Points', 'Remaining Items', 'Remaining Points']
+  ]);
   sh.getRange('A5').setFormula(
     '=IFERROR(SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),"")'
   );
   sh.getRange('B5').setFormula(
     '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
-    'MAP(teams,LAMBDA(team,COUNTIF(Claims!A2:A,team)))),"")'
+    'itemIds,FILTER(Items!A2:A,Items!A2:A<>""),' +
+    'MAP(teams,LAMBDA(team,SUM(MAP(itemIds,LAMBDA(itemId,' +
+    'IF(COUNTIFS(Claims!A2:A,team,Claims!B2:B,itemId)>0,1,0)))))),"")'
   );
   sh.getRange('C5').setFormula(
     '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
-    'MAP(teams,LAMBDA(team,SUM(IFNA(VLOOKUP(FILTER(Claims!B2:B,' +
-    'Claims!A2:A=team),Items!A2:C,3,FALSE),0))))),"")'
+    'itemIds,FILTER(Items!A2:A,Items!A2:A<>""),' +
+    'itemPoints,FILTER(Items!C2:C,Items!A2:A<>""),' +
+    'MAP(teams,LAMBDA(team,SUM(MAP(itemIds,itemPoints,LAMBDA(itemId,points,' +
+    'IF(COUNTIFS(Claims!A2:A,team,Claims!B2:B,itemId)>0,' +
+    'IF(points="",1,points),0))))))),"")'
   );
   sh.getRange('D5').setFormula(
     '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
-    'total,ROWS(FILTER(Items!A2:A,Items!A2:A<>"")),' +
-    'MAP(teams,LAMBDA(team,total-COUNTIF(Claims!A2:A,team)))),"")'
+    'itemIds,FILTER(Items!A2:A,Items!A2:A<>""),' +
+    'MAP(teams,LAMBDA(team,SUM(MAP(itemIds,LAMBDA(itemId,' +
+    'IF(COUNTIFS(Claims!A2:A,team,Claims!B2:B,itemId)=0,1,0)))))),"")'
+  );
+  sh.getRange('E5').setFormula(
+    '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
+    'itemIds,FILTER(Items!A2:A,Items!A2:A<>""),' +
+    'itemPoints,FILTER(Items!C2:C,Items!A2:A<>""),' +
+    'MAP(teams,LAMBDA(team,SUM(MAP(itemIds,itemPoints,LAMBDA(itemId,points,' +
+    'IF(COUNTIFS(Claims!A2:A,team,Claims!B2:B,itemId)=0,' +
+    'IF(points="",1,points),0))))))),"")'
   );
 
   sh.getRange('A25:C25').setValues([['Item ID', 'Item', 'Points']]);
@@ -603,13 +633,13 @@ function setupLeaderboard(sh) {
 
   sh.getRange('A1').setFontSize(16).setFontWeight('bold');
   sh.getRange('A2').setFontColor('#5f6368');
-  sh.getRange('A4:D4').setBackground('#f1f3f4').setFontWeight('bold');
+  sh.getRange('A4:E4').setBackground('#f1f3f4').setFontWeight('bold');
   sh.getRange('A25:CV25').setBackground('#f1f3f4').setFontWeight('bold');
-  sh.getRange('B5:D24').setNumberFormat('0');
+  sh.getRange('B5:E24').setNumberFormat('0');
   sh.setColumnWidth(1, 90);
   sh.setColumnWidth(2, 220);
   sh.setColumnWidth(3, 70);
-  sh.setColumnWidths(4, 97, 130);
+  sh.setColumnWidths(4, 2, 130);
   sh.setFrozenColumns(3);
   sh.setTabColor('#34a853');
 

@@ -55,7 +55,8 @@ class BingoVerificationOverlayTest {
         assertNotNull(second);
         assertEquals(first, second);
         assertEquals("SUMMER26", overlay.verificationCodeText());
-        assertEquals("Jul 30, 2026  5:42:18 PM EDT", overlay.currentTimeText());
+        assertEquals("07/30/2026", overlay.currentDateText());
+        assertEquals("5:42 PM EDT", overlay.currentTimeText());
     }
 
     @Test

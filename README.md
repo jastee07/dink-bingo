@@ -34,12 +34,18 @@ isn't detected, and a troubleshooting table. The summary below is the short vers
 Follow [`backend/README.md`](backend/README.md): create a Sheet, paste
 [`backend/Code.gs`](backend/Code.gs), run `setupSheet`, fill in the `Items` and `Teams` tabs,
 and deploy as a web app. Keep the `/exec` URL and the `token`. The generated `Leaderboard`
-tab shows each team's claimed count, points, remaining tiles, and an item-by-team claim matrix;
-it is a derived view and never decides whether a claim succeeds.
+tab shows each team's claimed count, earned points, remaining items, remaining points, and an
+item-by-team claim matrix; it is a derived view and never decides whether a claim succeeds.
 
 Keep the editable Sheet organizer-only. Players receive the `/exec` URL and event token, not
 Sheet access. The admin token and optional backend Discord webhook stay in the organizer-owned
 `Config` tab.
+
+To allow public read-only access to the board, use **File → Share → Publish to web** and
+select only the `Leaderboard` tab. Share the published URL, not the spreadsheet URL. Google
+supports publishing individual tabs, and changes update automatically after a short delay.
+Depending on your Google account settings, that page may be public to the web, so only use
+this if showing RSNs and team results publicly is acceptable.
 
 Verify it with the `curl` smoke tests in that README **before** configuring the plugin — most
 setup problems are deployment permissions, and they're far easier to spot from a terminal.
@@ -114,21 +120,6 @@ refresh reconciles that local state with the authoritative Sheet, including orga
 
 `run` launches RuneLite with the plugin side-loaded. Install Dink in that client too, and
 point the webhook at a throwaway Discord channel while testing.
-
-### Test Discord and screenshots without a drop
-
-Open the Dink Bingo sidebar and click **Send Discord test**. After confirmation, the plugin
-posts a conspicuous `[TEST]` request through the same Dink external-notification path as a
-real claim and requests a screenshot according to the normal settings. It does **not** call
-the Apps Script, write to `Claims`/`Audit`, or close a tile.
-
-Before testing, enable Dink's **External Plugin Requests → Enable External Plugin
-Notifications**, leave its **Send Image** setting at `Requested` or `Always`, and point the
-webhook override at a throwaway channel when possible. Be logged in to exercise screenshot
-capture. If the verification overlay is enabled, confirm its date, time, time zone, and code
-are readable in the attached image. A test that reaches neither Discord nor the RuneLite log
-usually means Dink is not installed in the side-loaded client; a logged `Skipping requested
-external dink` message means Dink's external notifications or webhook are not configured.
 
 ### Develop with a Jagex Account
 
