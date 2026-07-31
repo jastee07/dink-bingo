@@ -19,6 +19,11 @@ whether a tile is claimed — it asks, and only announces when the answer is `cl
 6. **Deploy → New deployment → Web app**, *Execute as* **Me**, *Who has access* **Anyone**.
    Copy the `/exec` URL.
 
+Keep the spreadsheet organizer-only. Give participants the `/exec` URL and player `token`,
+not access to the editable Sheet. The `admin_token` and optional `discord_webhook` remain in
+the organizer-owned `Config` tab and are never returned by the API. Hiding that tab is cosmetic,
+not access control.
+
 `Leaderboard` is a formula-driven, read-only view of the authoritative tabs. Its team summary
 shows claimed tiles, points, and remaining tiles; the matrix below shows every item against
 every distinct team. A tile claimed by one team remains open for all other teams. Correct
@@ -31,10 +36,10 @@ the `/exec` URL stays the same.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `?action=board&token=…&rsn=…` | The caller's team, remaining count, and every tile with its claim state |
 | `GET` | `?action=ping` | Liveness check, no auth |
-| `POST` | body `{token, rsn, itemId, itemName, quantity, source, claimId, accountHash}` | Attempt a claim |
-| `GET` | `?action=unclaim&admin_token=…&team=…&item_id=…` | Admin undo |
+| `POST` | body `{action:"board", token, rsn}` | The caller's team, remaining count, and every tile with its claim state |
+| `POST` | body `{token, rsn, itemId, itemName, quantity, source, claimId}` | Attempt a claim |
+| `POST` | body `{action:"unclaim", admin_token, team, item_id}` | Admin undo |
 
 Claim responses: `claimed`, `duplicate`, `not_on_board`, `not_on_team`, `event_closed`,
 or `error`. Only `claimed` triggers an announcement.
@@ -48,6 +53,11 @@ The plugin generates a `claimId` (UUID) per detected drop and reuses it across r
 The backend checks `claimId` against existing claims *before* anything else, so a retried
 POST returns the original result with `"replay": true` rather than double-claiming or
 falsely reporting a duplicate.
+
+When the original HTTP response is lost after the Sheet committed the claim, that replay is
+the first successful response the client sees, so the running client sends one Dink request.
+If RuneLite exits during that ambiguity window, the Sheet still owns the claim but no system
+can prove whether Discord received the announcement; the Sheet remains the authoritative record.
 
 ## Smoke tests
 
@@ -69,7 +79,8 @@ curl -sL "$URL?action=ping"
 Board (expect your team and every tile):
 
 ```bash
-curl -sL "$URL?action=board&token=$TOKEN&rsn=Jake"
+curl -sL -X POST "$URL" -H 'Content-Type: application/json' \
+  -d '{"action":"board","token":"'"$TOKEN"'","rsn":"Jake"}'
 ```
 
 First claim (expect `"status":"claimed"`):
@@ -104,15 +115,34 @@ done; wait
 Admin undo, then re-check the board:
 
 ```bash
-curl -sL "$URL?action=unclaim&admin_token=PASTE_ADMIN_TOKEN&team=Team%20One&item_id=21034"
+curl -sL -X POST "$URL" -H 'Content-Type: application/json' \
+  -d '{"action":"unclaim","admin_token":"PASTE_ADMIN_TOKEN","team":"Team One","item_id":21034}'
 ```
+
+## Upgrading an existing sheet
+
+If the sheet received claims using a version from before the security hardening release:
+
+1. Paste the new `Code.gs` and save.
+2. Run `scrubLegacySensitiveData` once from the Apps Script editor.
+3. Replace both `token` and `admin_token` in `Config` with newly generated UUIDs.
+4. Give participants only the new player token.
+5. Delete the retired `account_hash` column from `Claims` if you no longer want the empty
+   legacy column.
+6. Deploy a new web-app version. The `/exec` URL stays the same.
+
+The helper redacts legacy Audit payloads and clears stored account hashes. Token rotation is
+manual so the organizer controls when existing clients stop working.
 
 ## Trust model
 
-The player `token` is shared with every participant, so it stops drive-by posts but not a
-determined participant. The mitigations are visibility and reversibility, not secrecy:
+The player `token` is a shared event credential. Every participant needs it, so it stops
+drive-by posts but not a determined participant. The `/exec` URL alone does not authorize a
+board lookup or claim. The mitigations are visibility and reversibility:
 
-- `Audit` records **every** request including rejections, with the raw payload.
-- `Claims` records `account_hash` (a stable per-account id from RuneLite) next to the RSN,
-  so an impostor RSN or a mid-event name change is visible after the fact.
-- `admin_token` is separate and enables unclaim.
+- `Audit` records operational claim/unclaim fields but allowlists out tokens and webhook URLs.
+- `Claims` records the normalized RSN, item, source, claim id, and timestamp; it does not
+  receive a RuneLite account hash.
+- `admin_token` is organizer-only and enables unclaim.
+- `discord_webhook` is read only by Apps Script when backend announcements are enabled and is
+  never included in an API response or Audit row.

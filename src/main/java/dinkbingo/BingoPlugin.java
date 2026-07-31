@@ -34,6 +34,7 @@ import java.awt.image.BufferedImage;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
 @PluginDescriptor(
@@ -81,6 +82,14 @@ public class BingoPlugin extends Plugin {
 
     private NavigationButton navButton;
     private ScheduledFuture<?> refreshTask;
+    private final AtomicLong lifecycleGeneration = new AtomicLong();
+    private final AtomicLong refreshGeneration = new AtomicLong();
+    private final Object refreshStateLock = new Object();
+    private volatile boolean active;
+    private boolean refreshInFlight;
+    private boolean refreshPending;
+    private long inFlightLifecycle;
+    private long inFlightRefresh;
 
     @Provides
     BingoConfig provideConfig(ConfigManager configManager) {
@@ -89,6 +98,15 @@ public class BingoPlugin extends Plugin {
 
     @Override
     protected void startUp() {
+        active = true;
+        lifecycleGeneration.incrementAndGet();
+        refreshGeneration.incrementAndGet();
+        synchronized (refreshStateLock) {
+            refreshInFlight = false;
+            refreshPending = false;
+            inFlightLifecycle = 0;
+            inFlightRefresh = 0;
+        }
         detector.setClaimListener(this::onClaimResolved);
         overlayManager.add(verificationOverlay);
 
@@ -111,13 +129,27 @@ public class BingoPlugin extends Plugin {
 
     @Override
     protected void shutDown() {
+        active = false;
+        lifecycleGeneration.incrementAndGet();
+        refreshGeneration.incrementAndGet();
+        synchronized (refreshStateLock) {
+            refreshPending = false;
+        }
         if (refreshTask != null) {
             refreshTask.cancel(false);
             refreshTask = null;
         }
-        clientToolbar.removeNavigation(navButton);
+        if (navButton != null) {
+            clientToolbar.removeNavigation(navButton);
+        }
         navButton = null;
         overlayManager.remove(verificationOverlay);
+        panel.setRefreshHandler(() -> {
+        });
+        panel.setTestHandler(() -> {
+        });
+        detector.setClaimListener((response, source) -> {
+        });
         detector.reset();
     }
 
@@ -129,13 +161,29 @@ public class BingoPlugin extends Plugin {
         if (refreshTask != null) {
             refreshTask.cancel(false);
         }
+        if (!active) {
+            return;
+        }
         long minutes = Math.max(1, config.refreshMinutes());
         refreshTask = executor.scheduleWithFixedDelay(
             this::refreshBoard, minutes, minutes, TimeUnit.MINUTES);
     }
 
     void refreshBoard() {
+        if (!active) {
+            return;
+        }
+        long lifecycle = lifecycleGeneration.get();
+        long refresh = refreshGeneration.incrementAndGet();
+        clientThread.invokeLater(() -> beginRefresh(lifecycle, refresh));
+    }
+
+    private void beginRefresh(long lifecycle, long requestedRefresh) {
+        if (!isCurrent(lifecycle) || requestedRefresh != refreshGeneration.get()) {
+            return;
+        }
         if (!bingoClient.isConfigured()) {
+            detector.reset();
             panel.render(BingoBoard.EMPTY, false);
             return;
         }
@@ -144,18 +192,58 @@ public class BingoPlugin extends Plugin {
         }
 
         String rsn = client.getLocalPlayer().getName();
-        bingoClient.fetchBoard(rsn).thenAccept(board -> {
+        long fetchRefresh;
+        synchronized (refreshStateLock) {
+            if (refreshInFlight) {
+                refreshPending = true;
+                return;
+            }
+            refreshInFlight = true;
+            fetchRefresh = refreshGeneration.get();
+            inFlightLifecycle = lifecycle;
+            inFlightRefresh = fetchRefresh;
+        }
+
+        bingoClient.fetchBoard(rsn).whenComplete((board, error) ->
+            finishRefresh(lifecycle, fetchRefresh, board, error));
+    }
+
+    private void finishRefresh(long lifecycle, long fetchRefresh, BingoBoard board, Throwable error) {
+        boolean rerun;
+        synchronized (refreshStateLock) {
+            if (!refreshInFlight
+                || inFlightLifecycle != lifecycle
+                || inFlightRefresh != fetchRefresh) {
+                return;
+            }
+            refreshInFlight = false;
+            rerun = refreshPending;
+            refreshPending = false;
+        }
+
+        if (isCurrent(lifecycle)
+            && fetchRefresh == refreshGeneration.get()
+            && error == null
+            && board != null) {
             detector.setBoard(board);
             panel.render(board, true);
-        });
+        }
+        if (rerun && active) {
+            refreshBoard();
+        }
+    }
+
+    private boolean isCurrent(long lifecycle) {
+        return active && lifecycle == lifecycleGeneration.get();
     }
 
     @Subscribe
     public void onGameStateChanged(GameStateChanged event) {
         if (event.getGameState() == GameState.LOGGED_IN) {
             // The local player is not populated the instant the state flips.
-            clientThread.invokeLater(this::refreshBoard);
+            refreshBoard();
         } else if (event.getGameState() == GameState.LOGIN_SCREEN) {
+            refreshGeneration.incrementAndGet();
             detector.reset();
         }
     }
@@ -226,7 +314,14 @@ public class BingoPlugin extends Plugin {
         if (response == null) {
             return;
         }
+        long lifecycle = lifecycleGeneration.get();
+        clientThread.invokeLater(() -> handleClaimResolved(lifecycle, response, source));
+    }
 
+    private void handleClaimResolved(long lifecycle, ClaimResponse response, String source) {
+        if (!isCurrent(lifecycle)) {
+            return;
+        }
         announcer.announce(response, source);
 
         if (config.chatMessageOnClaim()) {
@@ -239,6 +334,14 @@ public class BingoPlugin extends Plugin {
     }
 
     private void sendAnnouncementTest() {
+        long lifecycle = lifecycleGeneration.get();
+        clientThread.invokeLater(() -> sendAnnouncementTest(lifecycle));
+    }
+
+    private void sendAnnouncementTest(long lifecycle) {
+        if (!isCurrent(lifecycle)) {
+            return;
+        }
         announcer.announceTest(detector.getBoard());
         sendChatMessage(
             "Bingo: sent a test request to Dink. Check Dink's External Plugin Requests settings "

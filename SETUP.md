@@ -27,6 +27,10 @@ config. Total player-side effort is about a minute.
    and remaining tiles for every distinct team in `Teams`. Make corrections in `Items`,
    `Teams`, or `Claims`; do not type over the leaderboard formulas.
 
+Keep the editable spreadsheet organizer-only. The `Config` tab contains the participant token,
+organizer-only admin token, and optional backend webhook. Hiding the tab is cosmetic and does
+not make those values safe from people who can view or edit the Sheet.
+
 ### 2. Deploy
 
 **Deploy → New deployment → Web app**, *Execute as* **Me**, *Who has access* **Anyone**.
@@ -35,6 +39,11 @@ Copy the `/exec` URL.
 > *Who has access: Anyone* is required. With "Anyone with a Google account", Apps Script
 > returns an HTML login page instead of JSON and every claim silently fails. The plugin logs
 > a specific warning when it sees this, but it's much easier to catch with the smoke tests.
+
+If this Sheet received claims from a pre-release version, follow
+[`backend/README.md` → Upgrading an existing sheet](backend/README.md#upgrading-an-existing-sheet)
+before deploying it again. That scrubs legacy Audit payloads and retired account hashes; rotate
+both tokens afterward.
 
 ### 3. Smoke-test before telling anyone
 
@@ -45,18 +54,20 @@ event's worth of confusion.
 ### 4. Hand out
 
 Send participants exactly two things: the **`/exec` URL** and the **`token`** from `Config`.
-Keep `admin_token` to yourself — that's what reverses a claim.
+Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
 
 ### During the event
 
 - `Claims` is the live board state. One row = one tile owned by one team.
 - `Leaderboard` is the organizer/spectator view. The same item can show claimed for one team
   and open for another; its summary and item matrix update automatically from `Claims`.
-- `Audit` logs **every** request including rejects, with the raw payload. This is where you
-  look when someone says "it didn't count".
+- `Audit` logs claim and unclaim attempts including rejects, using an allowlist that excludes
+  event tokens, admin tokens, and webhook URLs. This is where you look when someone says
+  "it didn't count".
 - To reverse a claim:
   ```bash
-  curl -sL "$URL?action=unclaim&admin_token=$ADMIN_TOKEN&team=Team%20One&item_id=21034"
+  curl -sL -X POST "$URL" -H 'Content-Type: application/json' \
+    -d '{"action":"unclaim","admin_token":"'"$ADMIN_TOKEN"'","team":"Team One","item_id":21034}'
   ```
   The tile reopens and players see it on their next refresh (default 5 min, or the panel's
   Refresh button).
@@ -120,6 +131,9 @@ but it's worth a one-line check in your event announcement.
 - **Drops that land while the plugin can't reach the backend.** Claims retry with backoff, but
   a client that closes mid-retry loses that attempt. The tile stays open — re-drop it or
   claim it manually.
+- **Guaranteed Discord delivery after a client crash.** The Sheet claim is atomic and
+  authoritative. If RuneLite exits after the Sheet commits but before Dink receives the
+  request, the claim remains recorded but the screenshot announcement can be missing.
 
 ### On "some players will already have the log"
 

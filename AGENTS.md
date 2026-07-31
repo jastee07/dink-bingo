@@ -80,9 +80,12 @@ without explicit authorization and a reversible test tile/team.
 
 ## Invariants to preserve
 
-- Announce only a fresh `claimed` response; never announce `duplicate`, failures, or replay.
+- Announce only a `claimed` response; never announce `duplicate` or failures. A replay returned
+  to the original in-flight client operation is announced because the earlier HTTP response was
+  lost and therefore never reached Dink.
 - Reuse the same `claimId` across retries.
 - Keep Apps Script mutations under `LockService.getScriptLock()`.
+- Never store event tokens, admin tokens, webhook URLs, or account hashes in Claims or Audit.
 - Canonicalize item IDs before matching.
 - Preserve the raw RuneLite loot-event paths and per-item dedupe; Dink's own loot thresholds
   must not control bingo detection.

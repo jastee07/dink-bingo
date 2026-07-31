@@ -23,6 +23,13 @@ public class BingoResponses {
     public static final String ERROR = "error";
 
     @Data
+    public static class BoardRequest {
+        String action;
+        String token;
+        String rsn;
+    }
+
+    @Data
     public static class BoardResponse {
         String status;
         @Nullable
@@ -57,8 +64,6 @@ public class BingoResponses {
         int quantity;
         String source;
         String claimId;
-        @Nullable
-        String accountHash;
     }
 
     @Data
@@ -83,6 +88,14 @@ public class BingoResponses {
 
         public boolean isClaimed() {
             return CLAIMED.equals(status);
+        }
+
+        public boolean isResolvedOutcome() {
+            return CLAIMED.equals(status)
+                || DUPLICATE.equals(status)
+                || NOT_ON_BOARD.equals(status)
+                || NOT_ON_TEAM.equals(status)
+                || EVENT_CLOSED.equals(status);
         }
     }
 }

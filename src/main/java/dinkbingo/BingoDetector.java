@@ -14,6 +14,7 @@ import java.util.Collection;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -59,13 +60,14 @@ public class BingoDetector {
      * authoritative, but this stops a second drop re-asking before the refresh lands.
      */
     private final Set<Integer> resolved = new CopyOnWriteArraySet<>();
+    private final AtomicLong generation = new AtomicLong();
 
     /**
      * Invoked with the response and the loot source for every submitted claim, on the
      * executor thread. The source is carried through rather than read from shared state,
      * because another drop can land during the backend round trip.
      */
-    private BiConsumer<ClaimResponse, String> claimListener = (res, source) -> {
+    private volatile BiConsumer<ClaimResponse, String> claimListener = (res, source) -> {
     };
 
     public void setClaimListener(BiConsumer<ClaimResponse, String> listener) {
@@ -74,9 +76,13 @@ public class BingoDetector {
 
     public void setBoard(BingoBoard board) {
         this.board = board;
+        // The sheet is authoritative. If an organizer unclaimed a tile, allow this client
+        // to submit it again instead of retaining the session-local resolved marker.
+        this.resolved.removeAll(board.getRemaining());
     }
 
     public void reset() {
+        this.generation.incrementAndGet();
         this.board = BingoBoard.EMPTY;
         this.inFlight.clear();
         this.resolved.clear();
@@ -143,19 +149,23 @@ public class BingoDetector {
         claim.setQuantity(quantity);
         claim.setSource(source != null ? source : "");
         claim.setClaimId(UUID.randomUUID().toString());
-        claim.setAccountHash(String.valueOf(client.getAccountHash()));
+        long claimGeneration = generation.get();
 
         log.debug("Submitting bingo claim for {} ({}) from {}", claim.getItemName(), itemId, source);
 
         bingoClient.submitClaim(claim).whenComplete((response, error) -> {
             try {
+                if (claimGeneration != generation.get()) {
+                    return; // plugin reset, logout, or configuration change while request was in flight
+                }
                 if (error != null || response == null) {
                     // Unresolved: allow a later drop of the same item to try again.
                     log.debug("Bingo claim for {} did not resolve", itemId, error);
                     return;
                 }
-                // Any definite answer means we stop asking about this tile.
-                resolved.add(itemId);
+                if (response.isResolvedOutcome()) {
+                    resolved.add(itemId);
+                }
                 claimListener.accept(response, claim.getSource());
             } finally {
                 inFlight.remove(itemId);

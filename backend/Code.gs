@@ -7,9 +7,10 @@
  *
  * Endpoints (deploy as a web app, execute as *me*, access *anyone*):
  *
- *   GET  ?action=board&token=…&rsn=…
- *   GET  ?action=unclaim&admin_token=…&team=…&item_id=…
- *   POST {token, rsn, itemId, itemName, quantity, source, claimId, accountHash}
+ *   GET  ?action=ping
+ *   POST {action: "board", token, rsn}
+ *   POST {action: "unclaim", admin_token, team, item_id}
+ *   POST {token, rsn, itemId, itemName, quantity, source, claimId}
  *
  * Run `setupSheet()` once from the editor to create the tabs.
  */
@@ -21,7 +22,8 @@ var SHEET_AUDIT = 'Audit';
 var SHEET_CONFIG = 'Config';
 var SHEET_LEADERBOARD = 'Leaderboard';
 
-var LOCK_TIMEOUT_MS = 20000;
+// Stay below the RuneLite HTTP client's read timeout so callers can receive retryable=true.
+var LOCK_TIMEOUT_MS = 5000;
 
 // ---------------------------------------------------------------------------
 // Entry points
@@ -32,14 +34,11 @@ function doGet(e) {
     var params = (e && e.parameter) || {};
     var action = params.action || 'board';
 
-    if (action === 'board') {
-      return handleBoard(params);
-    }
-    if (action === 'unclaim') {
-      return handleUnclaim(params);
-    }
     if (action === 'ping') {
       return json({ status: 'ok', version: 1 });
+    }
+    if (action === 'board' || action === 'unclaim') {
+      return json({ status: 'error', error: 'post_required' });
     }
     return json({ status: 'error', error: 'unknown_action' });
   } catch (err) {
@@ -56,6 +55,12 @@ function doPost(e) {
   }
 
   try {
+    if (body.action === 'board') {
+      return handleBoard(body);
+    }
+    if (body.action === 'unclaim') {
+      return handleUnclaim(body);
+    }
     return handleClaim(body);
   } catch (err) {
     audit(body.rsn, body.itemId, 'error', body, String(err));
@@ -126,7 +131,6 @@ function handleClaim(body) {
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
     // Caller retries with the same claimId, so refusing here is safe.
-    audit(rsn, itemId, 'lock_timeout', body, '');
     return json({ status: 'error', error: 'lock_timeout', retryable: true });
   }
 
@@ -138,37 +142,40 @@ function handleClaim(body) {
     if (body.claimId) {
       var prior = findClaimById(claims, body.claimId);
       if (prior) {
+        var replayItem = findItem(prior.itemId);
         return json({
           status: 'claimed',
           replay: true,
           team: prior.team,
           itemId: prior.itemId,
           itemName: prior.itemName,
+          points: replayItem ? replayItem.points : 0,
+          total: readItems().length,
           remaining: countRemaining(prior.team, claims)
         });
       }
     }
 
     if (!eventOpen(cfg)) {
-      audit(rsn, itemId, 'event_closed', body, '');
+      auditLocked(rsn, itemId, 'event_closed', body, '');
       return json({ status: 'event_closed' });
     }
 
     var team = resolveTeam(rsn);
     if (!team) {
-      audit(rsn, itemId, 'not_on_team', body, '');
+      auditLocked(rsn, itemId, 'not_on_team', body, '');
       return json({ status: 'not_on_team' });
     }
 
     var item = findItem(itemId);
     if (!item) {
-      audit(rsn, itemId, 'not_on_board', body, '');
+      auditLocked(rsn, itemId, 'not_on_board', body, '');
       return json({ status: 'not_on_board' });
     }
 
     var existing = claims[claimKey(team, itemId)];
     if (existing) {
-      audit(rsn, itemId, 'duplicate', body, 'held by ' + existing.rsn);
+      auditLocked(rsn, itemId, 'duplicate', body, 'held by ' + existing.rsn);
       return json({
         status: 'duplicate',
         team: team,
@@ -188,12 +195,11 @@ function handleClaim(body) {
       rsn,
       now,
       body.claimId || Utilities.getUuid(),
-      body.source || '',
-      body.accountHash || ''
+      body.source || ''
     ]);
     SpreadsheetApp.flush();
 
-    audit(rsn, itemId, 'claimed', body, 'team ' + team);
+    auditLocked(rsn, itemId, 'claimed', body, 'team ' + team);
 
     // Recount with the new row included.
     claims[claimKey(team, itemId)] = { rsn: rsn, claimedAt: now };
@@ -246,7 +252,7 @@ function handleUnclaim(params) {
       if (String(values[r][0]).trim() === team && parseInt(values[r][1], 10) === itemId) {
         sh.deleteRow(r + 1);
         SpreadsheetApp.flush();
-        audit('ADMIN', itemId, 'unclaimed', params, 'team ' + team);
+        auditLocked('ADMIN', itemId, 'unclaimed', params, 'team ' + team);
         return json({ status: 'unclaimed', team: team, itemId: itemId });
       }
     }
@@ -352,6 +358,23 @@ function resolveTeam(rsn) {
 }
 
 function audit(rsn, itemId, result, payload, notes) {
+  var lock = LockService.getScriptLock();
+  try {
+    if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
+      console.error('audit skipped: lock timeout');
+      return;
+    }
+    auditLocked(rsn, itemId, result, payload, notes);
+  } catch (err) {
+    // Auditing must never break a claim.
+    console.error('audit failed: ' + err);
+  } finally {
+    if (lock.hasLock()) lock.releaseLock();
+  }
+}
+
+/** Append an audit row while the caller already holds the script lock. */
+function auditLocked(rsn, itemId, result, payload, notes) {
   try {
     sheet(SHEET_AUDIT).appendRow([
       new Date(),
@@ -359,12 +382,27 @@ function audit(rsn, itemId, result, payload, notes) {
       itemId == null ? '' : itemId,
       result,
       notes || '',
-      JSON.stringify(payload || {}).slice(0, 4000)
+      JSON.stringify(sanitizeAuditPayload(payload)).slice(0, 4000)
     ]);
   } catch (err) {
     // Auditing must never break a claim.
     console.error('audit failed: ' + err);
   }
+}
+
+/**
+ * Audit only the operational fields needed to investigate a claim. Authentication values
+ * and webhook URLs are deliberately omitted even if a caller includes them.
+ */
+function sanitizeAuditPayload(payload) {
+  var input = payload || {};
+  var allowed = ['action', 'rsn', 'itemId', 'itemName', 'quantity', 'source', 'claimId', 'team', 'item_id'];
+  var safe = {};
+  for (var i = 0; i < allowed.length; i++) {
+    var key = allowed[i];
+    if (input[key] != null) safe[key] = input[key];
+  }
+  return safe;
 }
 
 // ---------------------------------------------------------------------------
@@ -379,7 +417,7 @@ function normalizeRsn(rsn) {
 }
 
 function tokenValid(cfg, token) {
-  if (!cfg.token) return true; // no token configured => open board
+  if (!cfg.token) return false; // fail closed if Config was damaged or incompletely created
   return String(token || '') === String(cfg.token);
 }
 
@@ -408,7 +446,8 @@ function postDiscord(webhook, content) {
       muteHttpExceptions: true
     });
   } catch (err) {
-    console.error('discord post failed: ' + err);
+    // Fetch failures can include the requested URL; never copy a webhook into logs.
+    console.error('discord post failed');
   }
 }
 
@@ -422,7 +461,7 @@ function setupSheet() {
   var tabs = {};
   tabs[SHEET_ITEMS] = ['item_id', 'item_name', 'points', 'notes'];
   tabs[SHEET_TEAMS] = ['rsn', 'team'];
-  tabs[SHEET_CLAIMS] = ['team', 'item_id', 'item_name', 'rsn', 'claimed_at', 'claim_id', 'source', 'account_hash'];
+  tabs[SHEET_CLAIMS] = ['team', 'item_id', 'item_name', 'rsn', 'claimed_at', 'claim_id', 'source'];
   tabs[SHEET_AUDIT] = ['ts', 'rsn', 'item_id', 'result', 'notes', 'raw_payload'];
   tabs[SHEET_CONFIG] = ['key', 'value'];
 
@@ -460,6 +499,55 @@ function setupSheet() {
   }
 
   SpreadsheetApp.getUi().alert('Dink Bingo tabs and leaderboard are ready. Fill in Items and Teams, then Deploy > New deployment > Web app.');
+}
+
+/**
+ * One-time upgrade helper for sheets used before the security hardening release.
+ * Redacts legacy raw audit payloads and clears the retired account_hash column.
+ * Rotate token/admin_token manually after this completes.
+ */
+function scrubLegacySensitiveData() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
+    throw new Error('Could not acquire the script lock');
+  }
+  try {
+    var auditSheet = sheet(SHEET_AUDIT);
+    var auditValues = auditSheet.getDataRange().getValues();
+    if (auditValues.length > 1) {
+      var payloadColumn = auditValues[0].indexOf('raw_payload');
+      if (payloadColumn >= 0) {
+        var sanitized = [];
+        for (var r = 1; r < auditValues.length; r++) {
+          var payload = {};
+          try {
+            payload = JSON.parse(String(auditValues[r][payloadColumn] || '{}'));
+          } catch (err) {
+            // A malformed legacy payload is not useful enough to retain at the cost of secrets.
+          }
+          sanitized.push([JSON.stringify(sanitizeAuditPayload(payload)).slice(0, 4000)]);
+        }
+        auditSheet.getRange(2, payloadColumn + 1, sanitized.length, 1).setValues(sanitized);
+      }
+    }
+
+    var claimsSheet = sheet(SHEET_CLAIMS);
+    var claimValues = claimsSheet.getDataRange().getValues();
+    if (claimValues.length > 1) {
+      var accountHashColumn = claimValues[0].indexOf('account_hash');
+      if (accountHashColumn >= 0) {
+        claimsSheet.getRange(2, accountHashColumn + 1, claimValues.length - 1, 1).clearContent();
+      }
+    }
+    SpreadsheetApp.flush();
+  } finally {
+    lock.releaseLock();
+  }
+
+  SpreadsheetApp.getUi().alert(
+    'Legacy audit payloads were redacted and account hashes cleared. ' +
+    'Now rotate token and admin_token in Config, then give participants the new event token.'
+  );
 }
 
 /**

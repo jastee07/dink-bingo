@@ -1,8 +1,10 @@
 # Dink Bingo
 
+[![CI](https://github.com/jastee07/dink-bingo/actions/workflows/ci.yml/badge.svg)](https://github.com/jastee07/dink-bingo/actions/workflows/ci.yml)
+
 A RuneLite plugin for clan bingo events. When you get a drop that's on your team's board, it
-claims the tile on a shared Google Sheet — exactly once, even if two teammates get it at the
-same moment — and announces it to Discord with a screenshot.
+atomically claims the tile on a shared Google Sheet—even if two teammates get it at the same
+moment—and asks Dink to announce it to Discord with a screenshot.
 
 It is a **companion** to [Dink](https://github.com/pajlads/DinkPlugin), not a fork. Install
 both from the Plugin Hub; Dink keeps updating independently.
@@ -35,8 +37,14 @@ and deploy as a web app. Keep the `/exec` URL and the `token`. The generated `Le
 tab shows each team's claimed count, points, remaining tiles, and an item-by-team claim matrix;
 it is a derived view and never decides whether a claim succeeds.
 
+Keep the editable Sheet organizer-only. Players receive the `/exec` URL and event token, not
+Sheet access. The admin token and optional backend Discord webhook stay in the organizer-owned
+`Config` tab.
+
 Verify it with the `curl` smoke tests in that README **before** configuring the plugin — most
 setup problems are deployment permissions, and they're far easier to spot from a terminal.
+Existing pre-release sheets must follow the
+[security upgrade steps](backend/README.md#upgrading-an-existing-sheet) before reuse.
 
 ### 2. Each player
 
@@ -53,7 +61,7 @@ own team in config.
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| Backend URL | *(blank)* | The Apps Script `/exec` URL. **No requests are made until this is set.** |
+| Backend URL | *(blank)* | The HTTPS Apps Script `/exec` URL. **No requests are made until this is set.** |
 | Event Token | *(blank)* | The `token` from the sheet's `Config` tab |
 | Refresh Interval | 5 min | How often the board is re-fetched so teammates' claims appear |
 | Include Collection Log | on | Also claim from `New item added to your collection log` |
@@ -91,8 +99,8 @@ Item ids are canonicalized (`ItemManager#canonicalize`) before matching, so note
 and equipped variants all resolve to the id on your board.
 
 Two safeguards keep the audit log clean: an in-flight set (RuneLite fires two events for some
-NPC kills) and a resolved set (the backend has already answered for that tile). The board
-refresh after every claim is what actually keeps state authoritative.
+NPC kills) and a resolved set (the backend has already answered for that tile). Each board
+refresh reconciles that local state with the authoritative Sheet, including organizer unclaims.
 
 ## Building
 
@@ -145,8 +153,9 @@ use **End sessions** in RuneScape account settings.
 1. A board item drops → Discord post with screenshot, new row in `Claims`.
 2. The same item drops again for your team → no post, `Audit` shows `duplicate`.
 3. Two clients hit the same item at once → exactly one `Claims` row.
-4. Kill the network mid-claim → the retry lands and still produces exactly one post.
-5. Admin unclaim → the tile reopens and the panel shows it after a refresh.
+4. Interrupt a response after the Sheet commits → the same `claimId` replay returns the
+   committed claim and the running client sends one Dink request.
+5. Admin unclaim → the tile reopens and can be claimed again after a refresh.
 
 ### A note on `mavenLocal()`
 
@@ -156,19 +165,25 @@ artifacts that module has since gained — which surfaces as
 `Could not find lwjgl-3.3.2-natives-linux-arm64.jar` during `test`. Adding `mavenLocal()`
 back will reintroduce that failure on any machine with an old cache.
 
-## Trust model
+## Privacy and trust model
 
-The event token is shared with every participant, so it stops drive-by posts but not a
-determined participant. The mitigations are visibility and reversibility:
+The event token is a shared participant credential. Every player needs it; the `/exec` URL
+alone does not authorize board access or claims. It stops drive-by posts but not a determined
+participant. The mitigations are visibility and reversibility:
 
-- `Audit` records every request, including rejections, with the raw payload.
-- `Claims` stores the RuneLite account hash next to the RSN, so an impostor RSN or a
-  mid-event name change is visible afterwards.
-- `admin_token` is separate and enables unclaim.
+- Board lookup sends the player's RSN and event token to the organizer's Apps Script.
+- Claims additionally send item id/name, quantity, loot source, and a random claim id.
+- No RuneLite account hash is collected.
+- `Audit` stores only allowlisted operational fields; tokens and webhook URLs are redacted.
+- `admin_token` is organizer-only and enables unclaim.
+- A backend `discord_webhook` remains in the organizer-owned Sheet and is never returned by
+  the API. A player's Dink webhook remains in their secret RuneLite configuration.
 
 For a friendly clan event this is the right trade-off. If you need more, move the backend off
 Apps Script and issue per-player tokens.
 
+See [SECURITY.md](SECURITY.md) for private vulnerability reporting and credential handling.
+
 ## License
 
-BSD-2-Clause
+[BSD-2-Clause](LICENSE)

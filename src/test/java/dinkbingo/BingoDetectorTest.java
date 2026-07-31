@@ -58,7 +58,6 @@ class BingoDetectorTest {
 
         when(client.getLocalPlayer()).thenReturn(localPlayer);
         when(localPlayer.getName()).thenReturn("Jake");
-        when(client.getAccountHash()).thenReturn(1234L);
         when(config.includeCollectionLog()).thenReturn(true);
         when(bingoClient.isConfigured()).thenReturn(true);
         // Identity canonicalization by default; overridden in the noted-item test.
@@ -80,7 +79,6 @@ class BingoDetectorTest {
         assertEquals("Abyssal demon", claim.getSource());
         assertEquals(1, claim.getQuantity());
         assertNotNull(claim.getClaimId(), "a claimId is required for backend idempotency");
-        assertEquals("1234", claim.getAccountHash());
     }
 
     @Test
@@ -167,6 +165,32 @@ class BingoDetectorTest {
     }
 
     @Test
+    void allowsAnotherDropAfterARetryableBackendErrorExhaustsRetries() {
+        ClaimResponse retryable = response(BingoResponses.ERROR);
+        retryable.setRetryable(true);
+        when(bingoClient.submitClaim(any()))
+            .thenReturn(CompletableFuture.completedFuture(retryable), new CompletableFuture<>());
+
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+
+        verify(bingoClient, times(2)).submitClaim(any());
+    }
+
+    @Test
+    void authoritativeBoardRefreshReopensAnAdministrativelyUnclaimedTile() {
+        when(bingoClient.submitClaim(any()))
+            .thenReturn(CompletableFuture.completedFuture(response(BingoResponses.CLAIMED)),
+                new CompletableFuture<>());
+
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+        detector.setBoard(board(open(WHIP, "Abyssal whip")));
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+
+        verify(bingoClient, times(2)).submitClaim(any());
+    }
+
+    @Test
     void canonicalizesNotedItemsBeforeMatching() {
         when(itemManager.canonicalize(NOTED_WHIP)).thenReturn(WHIP);
 
@@ -242,6 +266,21 @@ class BingoDetectorTest {
 
         assertEquals(BingoBoard.EMPTY, detector.getBoard());
         assertTrue(detector.getBoard().getRemaining().isEmpty());
+    }
+
+    @Test
+    void completionFromBeforeResetDoesNotNotifyTheNewSessionListener() {
+        CompletableFuture<ClaimResponse> oldClaim = new CompletableFuture<>();
+        when(bingoClient.submitClaim(any())).thenReturn(oldClaim);
+        List<ClaimResponse> seen = new ArrayList<>();
+        detector.setClaimListener((response, source) -> seen.add(response));
+
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+        detector.reset();
+        detector.setBoard(board(open(WHIP, "Abyssal whip")));
+        oldClaim.complete(response(BingoResponses.CLAIMED));
+
+        assertTrue(seen.isEmpty());
     }
 
     // ------------------------------------------------------------------
