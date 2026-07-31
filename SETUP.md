@@ -119,7 +119,8 @@ Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
 4. Confirm the **Loot Tracker** plugin is enabled (it is by default). See below — this matters
    more than it looks.
 5. Open the bingo icon in the sidebar. If you see your team name and the tile list, you're done.
-   "Not on a team" means your RSN isn't on the organizer's `Teams` tab.
+   Long tile lists scroll below the fixed team summary and Refresh button. "Not on a team"
+   means your RSN isn't on the organizer's `Teams` tab.
 
 Nothing else is needed. You don't pick your team, you don't enter item ids, and you don't have
 to remember to do anything when a drop lands.

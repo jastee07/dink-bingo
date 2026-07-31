@@ -14,6 +14,8 @@ import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
 import java.awt.Color;
@@ -38,6 +40,11 @@ public class BingoPanel extends PluginPanel {
     private final JLabel headerLabel = new JLabel();
     private final JLabel statusLabel = new JLabel();
     private final JPanel itemsPanel = new JPanel();
+    private final JScrollPane itemsScrollPane = new JScrollPane(
+        itemsPanel,
+        ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
+        ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
+    );
     private final JButton refreshButton = new JButton("Refresh");
 
     private Runnable refreshHandler = () -> {
@@ -76,8 +83,12 @@ public class BingoPanel extends PluginPanel {
         itemsPanel.setLayout(new GridBagLayout());
         itemsPanel.setBackground(ColorScheme.DARK_GRAY_COLOR);
 
+        itemsScrollPane.setBorder(BorderFactory.createEmptyBorder());
+        itemsScrollPane.getViewport().setBackground(ColorScheme.DARK_GRAY_COLOR);
+        itemsScrollPane.getVerticalScrollBar().setUnitIncrement(16);
+
         add(header, BorderLayout.NORTH);
-        add(itemsPanel, BorderLayout.CENTER);
+        add(itemsScrollPane, BorderLayout.CENTER);
     }
 
     public void setRefreshHandler(Runnable handler) {

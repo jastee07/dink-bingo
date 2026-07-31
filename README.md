@@ -63,7 +63,8 @@ Existing sheets must follow the
 3. In Dink Bingo: paste the **Backend URL** and **Event Token**.
 
 That's it — the player's RSN is matched against the `Teams` tab, so nobody has to pick their
-own team in config.
+own team in config. The sidebar keeps the team summary and Refresh button visible while long
+tile lists scroll underneath them.
 
 ## Configuration
 
