@@ -50,16 +50,19 @@ public class BingoDetector {
     private volatile BingoBoard board = BingoBoard.EMPTY;
 
     /**
-     * Logical tile ids with a claim POST in flight. Two events for one kill (RuneLite fires both
+     * Item ids with a contribution POST in flight. Duplicate events for one item must not both
+     * submit, while two different accepted items from one loot event must both be allowed.
      * {@code ServerNpcLoot} and {@code NpcLootReceived} for some NPCs) must not both submit.
      */
-    private final Set<String> inFlight = new CopyOnWriteArraySet<>();
+    private final Set<Integer> inFlight = new CopyOnWriteArraySet<>();
 
     /**
-     * Logical tile ids the backend has already resolved for us this session. The board refresh is
-     * authoritative, but this stops a second drop re-asking before the refresh lands.
+     * Item ids the backend has already credited for us this session.
      */
-    private final Set<String> resolved = new CopyOnWriteArraySet<>();
+    private final Set<Integer> resolvedItems = new CopyOnWriteArraySet<>();
+
+    /** Logical tiles completed before the refreshed board snapshot arrives. */
+    private final Set<String> resolvedTiles = new CopyOnWriteArraySet<>();
     private final AtomicLong generation = new AtomicLong();
 
     /**
@@ -78,14 +81,16 @@ public class BingoDetector {
         this.board = board;
         // The sheet is authoritative. If an organizer unclaimed a tile, allow this client
         // to submit it again instead of retaining the session-local resolved marker.
-        this.resolved.removeAll(board.getRemaining());
+        this.resolvedItems.removeAll(board.getOpenItemIds());
+        this.resolvedTiles.removeAll(board.getRemaining());
     }
 
     public void reset() {
         this.generation.incrementAndGet();
         this.board = BingoBoard.EMPTY;
         this.inFlight.clear();
-        this.resolved.clear();
+        this.resolvedItems.clear();
+        this.resolvedTiles.clear();
     }
 
     // ------------------------------------------------------------------
@@ -133,8 +138,9 @@ public class BingoDetector {
         BingoTile tile = board.getByItemId().get(itemId);
         return board.isClaimable(itemId)
             && tile != null
-            && !inFlight.contains(tile.getId())
-            && !resolved.contains(tile.getId());
+            && !inFlight.contains(itemId)
+            && !resolvedItems.contains(itemId)
+            && !resolvedTiles.contains(tile.getId());
     }
 
     private void submitIfClaimable(int itemId, int quantity, String source) {
@@ -142,8 +148,8 @@ public class BingoDetector {
             return;
         }
         BingoTile tile = board.getByItemId().get(itemId);
-        if (tile == null || !inFlight.add(tile.getId())) {
-            return; // lost the race against another event for this logical tile
+        if (tile == null || !inFlight.add(itemId)) {
+            return; // lost the race against another event for this exact item
         }
 
         BingoItem option = board.findOption(itemId);
@@ -169,11 +175,15 @@ public class BingoDetector {
                     return;
                 }
                 if (response.isResolvedOutcome()) {
-                    resolved.add(tile.getId());
+                    if (response.isComplete()) {
+                        resolvedTiles.add(tile.getId());
+                    } else {
+                        resolvedItems.add(itemId);
+                    }
                 }
                 claimListener.accept(response, claim.getSource());
             } finally {
-                inFlight.remove(tile.getId());
+                inFlight.remove(itemId);
             }
         });
     }

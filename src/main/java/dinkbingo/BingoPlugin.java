@@ -337,11 +337,17 @@ public class BingoPlugin extends Plugin {
             item + " for the " + tile + " tile" : item;
         switch (response.getStatus()) {
             case BingoResponses.CLAIMED:
-                return "Bingo: claimed " + claimLabel + " for " + response.getTeam()
+                return "Bingo: completed " + claimLabel + " for " + response.getTeam()
                     + " (" + response.getRemaining() + " tiles left).";
+            case BingoResponses.PROGRESS:
+                return "Bingo: added " + item + " to the " + (tile != null ? tile : item)
+                    + " tile for " + response.getTeam() + " (" + response.getProgress()
+                    + "/" + response.getRequired() + ").";
             case BingoResponses.DUPLICATE:
-                return "Bingo: the " + (tile != null ? tile : item) + " tile was already claimed by "
-                    + response.getClaimedBy() + " with " + item + ".";
+                return response.isComplete()
+                    ? "Bingo: the " + (tile != null ? tile : item) + " tile is already complete."
+                    : "Bingo: " + item + " is already credited to the "
+                        + (tile != null ? tile : item) + " tile.";
             case BingoResponses.NOT_ON_TEAM:
                 return "Bingo: your RSN is not on the Teams tab, so nothing was claimed.";
             case BingoResponses.EVENT_CLOSED:

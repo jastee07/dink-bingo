@@ -10,19 +10,20 @@ It is a **companion** to [Dink](https://github.com/pajlads/DinkPlugin), not a fo
 both from the Plugin Hub; Dink keeps updating independently.
 
 ```
-Dink Bingo  ──(1) POST claim ──▶  Apps Script ──▶  Google Sheet  (source of truth)
-            ◀─(2) claimed / duplicate ─┘
+Dink Bingo  ──(1) POST contribution ──▶  Apps Script ──▶  Google Sheet  (source of truth)
+            ◀─(2) progress / claimed / duplicate ─┘
             │
-            └─(3) only if claimed: PluginMessage("dink","notify") ──▶ Dink ──▶ Discord
-                                                                       (embed + screenshot)
+            └─(3) accepted progress or completion:
+                   PluginMessage("dink","notify") ──▶ Dink ──▶ Discord
+                                                       (embed + screenshot)
 ```
 
 ## Why the sheet decides and the client announces
 
-The sheet is the only thing allowed to mark a tile claimed, so duplicates are impossible no
-matter how many clients are running. But the *announcement* is fired from the client, because
-the backend can't take a screenshot of your game. You get central deduplication and proof of
-the drop, rather than having to pick one.
+The sheet is the only thing allowed to credit an item or complete a tile, so the same item
+cannot count twice no matter how many clients are running. But the *announcement* is fired
+from the client, because the backend can't take a screenshot of your game. You get central
+deduplication and proof of each accepted contribution.
 
 ## Setup
 
@@ -34,8 +35,9 @@ isn't detected, and a troubleshooting table. The summary below is the short vers
 Follow [`backend/README.md`](backend/README.md): create a Sheet, paste
 [`backend/Code.gs`](backend/Code.gs), run `setupSheet`, fill in the `Items` and `Teams` tabs,
 and deploy as a web app. Keep the `/exec` URL and the `token`. The generated `Leaderboard`
-tab shows each team's claimed count, earned points, remaining tiles, remaining points, and a
-tile-by-team claim matrix; it is a derived view and never decides whether a claim succeeds.
+tab shows each team's completed count, earned points, remaining tiles, remaining points, and a
+tile-by-team progress matrix; it is a derived view and never decides whether a contribution
+succeeds.
 
 Keep the editable Sheet organizer-only. Players receive the `/exec` URL and event token, not
 Sheet access. The admin token and optional backend Discord webhook stay in the organizer-owned
@@ -76,7 +78,9 @@ own team in config.
 | Show Verification Overlay | off | Keeps the current local date, time, time zone, and bingo code visible in the game view |
 | Bingo Verification Code | *(blank)* | Organizer-provided code displayed in the overlay; update it for each bingo |
 | Bingo Webhook Override | *(blank)* | Send claims to a specific Discord webhook instead of Dink's default |
-| Notification Message | see config | `%USERNAME%`, `%ITEM%`, `%TILE%`, `%TEAM%`, `%REMAINING%`, `%SOURCE%` |
+| Progress Message | see config | Used for every distinct item accepted before completion |
+| Completion Message | see config | Used when a contribution reaches the tile threshold |
+| Message tokens | — | `%USERNAME%`, `%ITEM%`, `%TILE%`, `%TEAM%`, `%PROGRESS%`, `%REQUIRED%`, `%REMAINING%`, `%SOURCE%` |
 | Game Chat Confirmation | on | Prints the claim result in game so you know it registered |
 
 ### Screenshot verification overlay
@@ -97,7 +101,7 @@ filter anywhere in this plugin.**
 
 `LootReceived` is accepted for every record type except `PLAYER` (which is gated behind
 *Include PK Loot* and arrives via `PlayerLootReceived`). That overlaps with the NPC events,
-but upstream has moved individual bosses between these events over time, and the per-tile
+but upstream has moved individual bosses between these events over time, and the per-item
 dedupe below makes the overlap free. See [SETUP.md](SETUP.md) for the full coverage table,
 including the dependency on the Loot Tracker plugin for non-NPC loot.
 
@@ -105,8 +109,10 @@ Item ids are canonicalized (`ItemManager#canonicalize`) before matching, so note
 and equipped variants all resolve to the id on your board.
 
 Two safeguards keep the audit log clean: an in-flight set (RuneLite fires two events for some
-NPC kills) and a resolved set (the backend has already answered for that tile). Each board
-refresh reconciles that local state with the authoritative Sheet, including organizer unclaims.
+NPC kills) and resolved item/tile sets. A partial K-of-N response resolves only the contributed
+item, so a different accepted option can still advance the tile; completion resolves the whole
+tile. Each board refresh reconciles that local state with the authoritative Sheet, including
+organizer unclaims.
 
 ## Building
 
@@ -141,12 +147,16 @@ use **End sessions** in RuneScape account settings.
 
 ### End-to-end checklist
 
-1. An accepted board item drops → Discord post with screenshot, new row in `Claims`.
-2. Another alternative for that logical tile drops → no post, `Audit` shows `duplicate`.
-3. Two clients hit different alternatives for the same tile → exactly one `Claims` row.
-4. Interrupt a response after the Sheet commits → the same `claimId` replay returns the
-   committed claim and the running client sends one Dink request.
-5. Admin unclaim → the tile reopens and can be claimed again after a refresh.
+1. On a 2-of-3 tile, the first distinct option returns `progress` at 1/2, creates one `Claims`
+   row, and sends a progress screenshot post.
+2. Repeating that same item returns `duplicate` and sends no post.
+3. A second distinct option returns `claimed` at 2/2, creates the second contribution row,
+   awards the tile's points, and sends a completion screenshot post.
+4. A later unused option returns `duplicate` because the tile is complete.
+5. Interrupt a response after the Sheet commits → the same `claimId` replay returns the
+   original result and the running client sends one Dink request.
+6. Admin unclaim one item → progress decreases; unclaim without `item_id` → all contributions
+   are removed and the tile fully reopens after refresh.
 
 ### A note on `mavenLocal()`
 
@@ -163,10 +173,10 @@ alone does not authorize board access or claims. It stops drive-by posts but not
 participant. The mitigations are visibility and reversibility:
 
 - Board lookup sends the player's RSN and event token to the organizer's Apps Script.
-- Claims additionally send item id/name, quantity, loot source, and a random claim id.
+- Contributions additionally send item id/name, quantity, loot source, and a random claim id.
 - No RuneLite account hash is collected.
 - `Audit` stores only allowlisted operational fields; tokens and webhook URLs are redacted.
-- `admin_token` is organizer-only and enables unclaim.
+- `admin_token` is organizer-only and enables item-level or whole-tile unclaim.
 - A backend `discord_webhook` remains in the organizer-owned Sheet and is never returned by
   the API. A player's Dink webhook remains in their secret RuneLite configuration.
 

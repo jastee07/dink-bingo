@@ -14,8 +14,9 @@ public class BingoResponses {
     private BingoResponses() {
     }
 
-    /** Outcome of a claim attempt. Only {@link #CLAIMED} triggers an announcement. */
+    /** Outcomes of a claim attempt. Accepted progress and completion trigger announcements. */
     public static final String CLAIMED = "claimed";
+    public static final String PROGRESS = "progress";
     public static final String DUPLICATE = "duplicate";
     public static final String NOT_ON_BOARD = "not_on_board";
     public static final String NOT_ON_TEAM = "not_on_team";
@@ -48,6 +49,8 @@ public class BingoResponses {
         String id;
         String name;
         int points;
+        int required;
+        int progress;
         boolean claimed;
         @Nullable
         String claimedBy;
@@ -56,6 +59,8 @@ public class BingoResponses {
         @Nullable
         BoardItem claimedItem;
         @Nullable
+        List<BoardClaimedItem> claimedItems;
+        @Nullable
         List<BoardItem> options;
     }
 
@@ -63,6 +68,16 @@ public class BingoResponses {
     public static class BoardItem {
         int id;
         String name;
+    }
+
+    @Data
+    public static class BoardClaimedItem {
+        int id;
+        String name;
+        @Nullable
+        String claimedBy;
+        @Nullable
+        String claimedAt;
     }
 
     @Data
@@ -90,12 +105,17 @@ public class BingoResponses {
         @Nullable
         String itemName;
         int points;
+        int progress;
+        int required;
+        boolean complete;
         int remaining;
         int total;
         @Nullable
         String claimedBy;
         @Nullable
         String claimedAt;
+        @Nullable
+        List<BoardClaimedItem> claimedItems;
         @Nullable
         String error;
         boolean retryable;
@@ -104,8 +124,17 @@ public class BingoResponses {
             return CLAIMED.equals(status);
         }
 
+        public boolean isProgress() {
+            return PROGRESS.equals(status);
+        }
+
+        public boolean isAnnounceable() {
+            return isClaimed() || isProgress();
+        }
+
         public boolean isResolvedOutcome() {
             return CLAIMED.equals(status)
+                || PROGRESS.equals(status)
                 || DUPLICATE.equals(status)
                 || NOT_ON_BOARD.equals(status)
                 || NOT_ON_TEAM.equals(status)

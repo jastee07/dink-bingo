@@ -20,6 +20,8 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.StringJoiner;
 
 /**
@@ -132,8 +134,19 @@ public class BingoPanel extends PluginPanel {
 
         JLabel icon = new JLabel();
         icon.setPreferredSize(new Dimension(36, 32));
-        BingoItem iconItem = tile.getClaimedItem() != null ? tile.getClaimedItem() :
-            (tile.getOptions().isEmpty() ? null : tile.getOptions().get(0));
+        Set<Integer> creditedIds = new HashSet<>();
+        for (BingoContribution contribution : tile.getClaimedItems()) {
+            creditedIds.add(contribution.getId());
+        }
+        BingoItem iconItem = tile.getClaimedItem();
+        if (iconItem == null) {
+            for (BingoItem option : tile.getOptions()) {
+                if (!creditedIds.contains(option.getId())) {
+                    iconItem = option;
+                    break;
+                }
+            }
+        }
         if (iconItem != null) {
             AsyncBufferedImage image = itemManager.getImage(iconItem.getId());
             image.addTo(icon);
@@ -144,23 +157,24 @@ public class BingoPanel extends PluginPanel {
         name.setFont(FontManager.getRunescapeSmallFont());
         if (tile.isClaimed()) {
             String winner = tile.getClaimedItem() != null ? tile.getClaimedItem().getName() : null;
-            String label = winner != null && !winner.equalsIgnoreCase(tile.getName()) ?
-                tile.getName() + " — " + winner : tile.getName();
             // Strikethrough via HTML is the only way to get it on a plain JLabel.
-            name.setText("<html><s>" + escape(label) + "</s></html>");
+            name.setText("<html><s>" + escape(tile.getName()) + "</s></html>");
             name.setForeground(CLAIMED_COLOR);
             name.setToolTipText("Claimed by " + tile.getClaimedBy() +
                 (winner == null ? "" : " with " + winner));
         } else {
-            name.setText(escape(tile.getName()));
+            name.setText(tile.getName());
             name.setForeground(OPEN_COLOR);
-            if (tile.getOptions().size() > 1) {
-                StringJoiner options = new StringJoiner(", ", "Any one of: ", "");
-                for (BingoItem option : tile.getOptions()) {
-                    options.add(option.getName());
-                }
-                name.setToolTipText(options.toString());
+            StringJoiner credited = new StringJoiner(", ");
+            for (BingoContribution contribution : tile.getClaimedItems()) {
+                credited.add(contribution.getName());
             }
+            StringJoiner missing = new StringJoiner(", ");
+            for (BingoItem option : tile.getOptions()) {
+                if (!creditedIds.contains(option.getId())) missing.add(option.getName());
+            }
+            name.setToolTipText((tile.getClaimedItems().isEmpty() ? "" :
+                "Credited: " + credited + ". ") + "Still eligible: " + missing);
         }
         row.add(name, BorderLayout.CENTER);
 
@@ -169,6 +183,11 @@ public class BingoPanel extends PluginPanel {
             by.setFont(FontManager.getRunescapeSmallFont());
             by.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
             row.add(by, BorderLayout.EAST);
+        } else if (tile.getRequired() > 1 || tile.getProgress() > 0) {
+            JLabel progress = new JLabel(tile.getProgress() + "/" + tile.getRequired());
+            progress.setFont(FontManager.getRunescapeSmallFont());
+            progress.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
+            row.add(progress, BorderLayout.EAST);
         }
 
         return row;

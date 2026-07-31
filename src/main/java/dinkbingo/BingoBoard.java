@@ -37,6 +37,9 @@ public final class BingoBoard {
     /** Logical tile ids this team has not claimed yet. */
     private final Set<String> remaining;
 
+    /** Accepted item ids not yet credited for their logical tile. */
+    private final Set<Integer> openItemIds;
+
     public BingoBoard(@Nullable String team, List<BingoTile> tiles, boolean eventOpen) {
         this.team = team;
         this.tiles = Collections.unmodifiableList(new ArrayList<>(tiles));
@@ -45,13 +48,21 @@ public final class BingoBoard {
         Map<Integer, BingoTile> byItemId = new LinkedHashMap<>();
         Map<String, BingoTile> byTileId = new LinkedHashMap<>();
         Set<String> remaining = new LinkedHashSet<>();
+        Set<Integer> openItemIds = new LinkedHashSet<>();
         for (BingoTile tile : tiles) {
             if (byTileId.put(tile.getId(), tile) != null) {
                 throw new IllegalArgumentException("Duplicate tile id: " + tile.getId());
             }
+            Set<Integer> credited = new LinkedHashSet<>();
+            for (BingoContribution contribution : tile.getClaimedItems()) {
+                credited.add(contribution.getId());
+            }
             for (BingoItem option : tile.getOptions()) {
                 if (byItemId.put(option.getId(), tile) != null) {
                     throw new IllegalArgumentException("Item belongs to multiple tiles: " + option.getId());
+                }
+                if (!tile.isClaimed() && !credited.contains(option.getId())) {
+                    openItemIds.add(option.getId());
                 }
             }
             if (!tile.isClaimed()) {
@@ -61,6 +72,7 @@ public final class BingoBoard {
         this.byItemId = Collections.unmodifiableMap(byItemId);
         this.byTileId = Collections.unmodifiableMap(byTileId);
         this.remaining = Collections.unmodifiableSet(remaining);
+        this.openItemIds = Collections.unmodifiableSet(openItemIds);
     }
 
     /**
@@ -71,7 +83,7 @@ public final class BingoBoard {
      */
     public boolean isClaimable(int itemId) {
         BingoTile tile = byItemId.get(itemId);
-        return eventOpen && team != null && tile != null && remaining.contains(tile.getId());
+        return eventOpen && team != null && tile != null && openItemIds.contains(itemId);
     }
 
     public int getRemainingCount() {

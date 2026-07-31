@@ -136,7 +136,7 @@ class BingoDetectorTest {
         detector.onLoot(loot(WHIP, 1), "Abyssal demon");
         detector.onLoot(loot(SCROLL, 1), "Chambers of Xeric");
 
-        verify(bingoClient, times(1)).submitClaim(any());
+        verify(bingoClient, times(2)).submitClaim(any());
     }
 
     @Test
@@ -151,6 +151,38 @@ class BingoDetectorTest {
         detector.onLoot(loot(SCROLL, 1), "Chambers of Xeric");
 
         verify(bingoClient, times(1)).submitClaim(any());
+    }
+
+    @Test
+    void differentThresholdOptionsCanAdvanceTogether() {
+        detector.setBoard(board(thresholdGroup("rare-drop", "Two rare drops", 2,
+            new BingoItem(WHIP, "Abyssal whip"),
+            new BingoItem(SCROLL, "Dexterous prayer scroll"))));
+
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+        detector.onLoot(loot(SCROLL, 1), "Chambers of Xeric");
+
+        verify(bingoClient, times(2)).submitClaim(any());
+    }
+
+    @Test
+    void acceptedProgressSuppressesOnlyTheCreditedItem() {
+        detector.setBoard(board(thresholdGroup("rare-drop", "Two rare drops", 2,
+            new BingoItem(WHIP, "Abyssal whip"),
+            new BingoItem(SCROLL, "Dexterous prayer scroll"))));
+        ClaimResponse progress = response(BingoResponses.PROGRESS);
+        progress.setTileId("rare-drop");
+        progress.setProgress(1);
+        progress.setRequired(2);
+        progress.setComplete(false);
+        when(bingoClient.submitClaim(any()))
+            .thenReturn(CompletableFuture.completedFuture(progress), new CompletableFuture<>());
+
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+        detector.onLoot(loot(SCROLL, 1), "Chambers of Xeric");
+
+        verify(bingoClient, times(2)).submitClaim(any());
     }
 
     /**
@@ -344,12 +376,20 @@ class BingoDetectorTest {
 
     private static BingoTile claimed(int id, String name, String by) {
         BingoItem item = new BingoItem(id, name);
-        return new BingoTile(String.valueOf(id), name, 1, Collections.singletonList(item),
+        BingoContribution contribution =
+            new BingoContribution(id, name, by, "2026-07-30T00:00:00Z");
+        return new BingoTile(String.valueOf(id), name, 1, 1, 1,
+            Collections.singletonList(item), Collections.singletonList(contribution),
             true, by, "2026-07-30T00:00:00Z", item);
     }
 
     private static BingoTile group(String id, String name, BingoItem... options) {
-        return new BingoTile(id, name, 1, Arrays.asList(options), false, null, null, null);
+        return thresholdGroup(id, name, 1, options);
+    }
+
+    private static BingoTile thresholdGroup(String id, String name, int required, BingoItem... options) {
+        return new BingoTile(id, name, 1, required, 0, Arrays.asList(options),
+            Collections.emptyList(), false, null, null, null);
     }
 
     private static ClaimResponse response(String status) {
@@ -360,6 +400,10 @@ class BingoDetectorTest {
         response.setTileName("Abyssal whip");
         response.setItemId(WHIP);
         response.setItemName("Abyssal whip");
+        response.setProgress(BingoResponses.CLAIMED.equals(status) ? 1 : 0);
+        response.setRequired(1);
+        response.setComplete(BingoResponses.CLAIMED.equals(status)
+            || BingoResponses.DUPLICATE.equals(status));
         response.setRemaining(1);
         response.setTotal(2);
         return response;

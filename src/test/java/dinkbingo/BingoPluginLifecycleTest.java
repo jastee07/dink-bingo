@@ -135,7 +135,9 @@ class BingoPluginLifecycleTest {
     private static BingoBoard board(String team) {
         return new BingoBoard(team, Collections.singletonList(
             new BingoTile("4151", "Abyssal whip", 1,
+                1, 0,
                 Collections.singletonList(new BingoItem(4151, "Abyssal whip")),
+                Collections.emptyList(),
                 false, null, null, null)), true);
     }
 }

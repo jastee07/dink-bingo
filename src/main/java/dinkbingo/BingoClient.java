@@ -3,6 +3,7 @@ package dinkbingo;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import dinkbingo.BingoResponses.BoardItem;
+import dinkbingo.BingoResponses.BoardClaimedItem;
 import dinkbingo.BingoResponses.BoardRequest;
 import dinkbingo.BingoResponses.BoardResponse;
 import dinkbingo.BingoResponses.BoardTile;
@@ -93,8 +94,22 @@ public class BingoClient {
                 }
                 BoardItem won = tile.getClaimedItem();
                 BingoItem claimedItem = won == null ? null : new BingoItem(won.getId(), won.getName());
-                tiles.add(new BingoTile(tile.getId(), tile.getName(), tile.getPoints(), options,
-                    tile.isClaimed(), tile.getClaimedBy(), tile.getClaimedAt(), claimedItem));
+                List<BingoContribution> claimedItems = new ArrayList<>();
+                if (tile.getClaimedItems() != null) {
+                    for (BoardClaimedItem credited : tile.getClaimedItems()) {
+                        claimedItems.add(new BingoContribution(
+                            credited.getId(),
+                            credited.getName(),
+                            credited.getClaimedBy(),
+                            credited.getClaimedAt()
+                        ));
+                    }
+                }
+                tiles.add(new BingoTile(
+                    tile.getId(), tile.getName(), tile.getPoints(), tile.getRequired(),
+                    tile.getProgress(), options, claimedItems, tile.isClaimed(),
+                    tile.getClaimedBy(), tile.getClaimedAt(), claimedItem
+                ));
             }
             return new BingoBoard(res.getTeam(), tiles, res.isEventOpen());
         });

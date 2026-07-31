@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.StringJoiner;
 
 /**
  * Hands a successful claim to Dink, which renders the embed, attaches the screenshot, and
@@ -46,14 +47,16 @@ public class BingoAnnouncer {
     }
 
     public void announce(ClaimResponse claim, String source) {
-        if (claim == null || !claim.isClaimed()) {
+        if (claim == null || !claim.isAnnounceable()) {
             return;
         }
 
         String itemName = claim.getItemName() != null ? claim.getItemName() : "an item";
         String tileName = claim.getTileName() != null ? claim.getTileName() : itemName;
         String team = claim.getTeam() != null ? claim.getTeam() : "their team";
-        post(claim, source, itemName, tileName, team, config.notifyMessage(), "Bingo tile claimed");
+        String text = claim.isProgress() ? config.progressMessage() : config.notifyMessage();
+        String title = claim.isProgress() ? "Bingo tile progress" : "Bingo tile completed";
+        post(claim, source, itemName, tileName, team, text, title);
     }
 
     private void post(
@@ -77,17 +80,28 @@ public class BingoAnnouncer {
         replacements.put("%ITEM%", linkReplacement(itemName, WIKI_SEARCH_URL + urlEncode(itemName)));
         replacements.put("%TILE%", textReplacement(tileName));
         replacements.put("%TEAM%", textReplacement(team));
+        replacements.put("%PROGRESS%", textReplacement(String.valueOf(claim.getProgress())));
+        replacements.put("%REQUIRED%", textReplacement(String.valueOf(claim.getRequired())));
         replacements.put("%REMAINING%", textReplacement(String.valueOf(claim.getRemaining())));
         replacements.put("%SOURCE%", textReplacement(source != null ? source : "unknown"));
         data.put("replacements", replacements);
 
-        List<Map<String, Object>> fields = new ArrayList<>(4);
+        List<Map<String, Object>> fields = new ArrayList<>(6);
         if (!tileName.equalsIgnoreCase(itemName)) {
             fields.add(field("Bingo Tile", tileName, false));
-            fields.add(field("Winning Item", itemName, false));
+            fields.add(field(claim.isProgress() ? "Contributed Item" : "Completing Item",
+                itemName, false));
         }
+        fields.add(field("Progress", claim.getProgress() + " / " + claim.getRequired(), true));
         fields.add(field("Team", team, true));
         fields.add(field("Tiles Remaining", claim.getRemaining() + " / " + claim.getTotal(), true));
+        if (claim.getClaimedItems() != null && !claim.getClaimedItems().isEmpty()) {
+            StringJoiner credited = new StringJoiner(", ");
+            for (BingoResponses.BoardClaimedItem contribution : claim.getClaimedItems()) {
+                credited.add(contribution.getName());
+            }
+            fields.add(field("Credited Items", credited.toString(), false));
+        }
         if (source != null && !source.isEmpty()) {
             fields.add(field("Source", source, true));
         }
@@ -101,6 +115,9 @@ public class BingoAnnouncer {
         metadata.put("team", team);
         metadata.put("remaining", claim.getRemaining());
         metadata.put("points", claim.getPoints());
+        metadata.put("progress", claim.getProgress());
+        metadata.put("required", claim.getRequired());
+        metadata.put("complete", claim.isComplete());
         data.put("metadata", metadata);
 
         // Dink rejects the whole request unless every element is an okhttp3.HttpUrl.
@@ -118,7 +135,7 @@ public class BingoAnnouncer {
             }
         }
 
-        log.info("Announcing bingo claim for {}", itemName);
+        log.info("Announcing bingo {} for {}", claim.isProgress() ? "progress" : "completion", itemName);
         eventBus.post(new PluginMessage(DINK_NAMESPACE, DINK_NOTIFY, data));
     }
 

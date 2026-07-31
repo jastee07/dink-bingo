@@ -8,7 +8,7 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * A logical board slot. Any one of {@link #options} can claim it.
+ * A logical board slot completed by {@link #required} distinct items from {@link #options}.
  */
 @Value
 public class BingoTile {
@@ -19,7 +19,13 @@ public class BingoTile {
 
     int points;
 
+    int required;
+
+    int progress;
+
     List<BingoItem> options;
+
+    List<BingoContribution> claimedItems;
 
     boolean claimed;
 
@@ -36,7 +42,10 @@ public class BingoTile {
         String id,
         String name,
         int points,
+        int required,
+        int progress,
         List<BingoItem> options,
+        List<BingoContribution> claimedItems,
         boolean claimed,
         @Nullable String claimedBy,
         @Nullable String claimedAt,
@@ -45,7 +54,10 @@ public class BingoTile {
         this.id = id;
         this.name = name;
         this.points = points;
+        this.required = required;
+        this.progress = progress;
         this.options = Collections.unmodifiableList(new ArrayList<>(options));
+        this.claimedItems = Collections.unmodifiableList(new ArrayList<>(claimedItems));
         this.claimed = claimed;
         this.claimedBy = claimedBy;
         this.claimedAt = claimedAt;
