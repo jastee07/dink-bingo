@@ -67,9 +67,23 @@ class BingoAnnouncerTest {
 
         assertEquals("Abyssal whip", replacements.get("%ITEM%").get("value"));
         assertTrue(replacements.get("%ITEM%").get("richValue").contains("oldschool.runescape.wiki"));
+        assertEquals("Any rare drop", replacements.get("%TILE%").get("value"));
         assertEquals("Team One", replacements.get("%TEAM%").get("value"));
         assertEquals("3", replacements.get("%REMAINING%").get("value"));
         assertEquals("Abyssal demon", replacements.get("%SOURCE%").get("value"));
+    }
+
+    @Test
+    void includesTheLogicalTileAndWinningItemAsEvidence() {
+        announcer.announce(claim(BingoResponses.CLAIMED), "Abyssal demon");
+
+        Map<String, Object> data = capture().getData();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> fields = (List<Map<String, Object>>) data.get("fields");
+        assertTrue(fields.stream().anyMatch(field ->
+            "Bingo Tile".equals(field.get("name")) && "Any rare drop".equals(field.get("value"))));
+        assertTrue(fields.stream().anyMatch(field ->
+            "Winning Item".equals(field.get("name")) && "Abyssal whip".equals(field.get("value"))));
     }
 
     /** Dink drops the entire request unless every url is an okhttp3.HttpUrl instance. */
@@ -139,6 +153,8 @@ class BingoAnnouncerTest {
         ClaimResponse response = new ClaimResponse();
         response.setStatus(status);
         response.setTeam("Team One");
+        response.setTileId("rare-drop");
+        response.setTileName("Any rare drop");
         response.setItemId(4151);
         response.setItemName("Abyssal whip");
         response.setPoints(1);

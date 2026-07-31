@@ -11,7 +11,6 @@ import javax.inject.Inject;
 import javax.inject.Singleton;
 import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
-import javax.swing.ImageIcon;
 import javax.swing.JButton;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
@@ -21,6 +20,7 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
+import java.util.StringJoiner;
 
 /**
  * Side panel showing the team's board: which tiles are still open, and who took the rest.
@@ -107,7 +107,7 @@ public class BingoPanel extends PluginPanel {
         }
 
         headerLabel.setText(board.getTeam());
-        statusLabel.setText(board.getRemainingCount() + " of " + board.getItems().size() + " tiles left"
+        statusLabel.setText(board.getRemainingCount() + " of " + board.getTiles().size() + " tiles left"
             + (board.isEventOpen() ? "" : " (event closed)"));
 
         GridBagConstraints c = new GridBagConstraints();
@@ -116,8 +116,8 @@ public class BingoPanel extends PluginPanel {
         c.gridy = 0;
         c.weightx = 1;
 
-        for (BingoItem item : board.getItems()) {
-            itemsPanel.add(buildRow(item), c);
+        for (BingoTile tile : board.getTiles()) {
+            itemsPanel.add(buildRow(tile), c);
             c.gridy++;
         }
 
@@ -125,32 +125,47 @@ public class BingoPanel extends PluginPanel {
         itemsPanel.repaint();
     }
 
-    private JPanel buildRow(BingoItem item) {
+    private JPanel buildRow(BingoTile tile) {
         JPanel row = new JPanel(new BorderLayout(6, 0));
         row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
         row.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
 
         JLabel icon = new JLabel();
         icon.setPreferredSize(new Dimension(36, 32));
-        AsyncBufferedImage image = itemManager.getImage(item.getId());
-        image.addTo(icon);
+        BingoItem iconItem = tile.getClaimedItem() != null ? tile.getClaimedItem() :
+            (tile.getOptions().isEmpty() ? null : tile.getOptions().get(0));
+        if (iconItem != null) {
+            AsyncBufferedImage image = itemManager.getImage(iconItem.getId());
+            image.addTo(icon);
+        }
         row.add(icon, BorderLayout.WEST);
 
         JLabel name = new JLabel();
         name.setFont(FontManager.getRunescapeSmallFont());
-        if (item.isClaimed()) {
+        if (tile.isClaimed()) {
+            String winner = tile.getClaimedItem() != null ? tile.getClaimedItem().getName() : null;
+            String label = winner != null && !winner.equalsIgnoreCase(tile.getName()) ?
+                tile.getName() + " — " + winner : tile.getName();
             // Strikethrough via HTML is the only way to get it on a plain JLabel.
-            name.setText("<html><s>" + escape(item.getName()) + "</s></html>");
+            name.setText("<html><s>" + escape(label) + "</s></html>");
             name.setForeground(CLAIMED_COLOR);
-            name.setToolTipText("Claimed by " + item.getClaimedBy());
+            name.setToolTipText("Claimed by " + tile.getClaimedBy() +
+                (winner == null ? "" : " with " + winner));
         } else {
-            name.setText(escape(item.getName()));
+            name.setText(escape(tile.getName()));
             name.setForeground(OPEN_COLOR);
+            if (tile.getOptions().size() > 1) {
+                StringJoiner options = new StringJoiner(", ", "Any one of: ", "");
+                for (BingoItem option : tile.getOptions()) {
+                    options.add(option.getName());
+                }
+                name.setToolTipText(options.toString());
+            }
         }
         row.add(name, BorderLayout.CENTER);
 
-        if (item.isClaimed() && item.getClaimedBy() != null) {
-            JLabel by = new JLabel(item.getClaimedBy());
+        if (tile.isClaimed() && tile.getClaimedBy() != null) {
+            JLabel by = new JLabel(tile.getClaimedBy());
             by.setFont(FontManager.getRunescapeSmallFont());
             by.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
             row.add(by, BorderLayout.EAST);

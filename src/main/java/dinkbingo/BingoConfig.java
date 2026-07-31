@@ -155,7 +155,7 @@ public interface BingoConfig extends Config {
     @ConfigItem(
         keyName = "notifyMessage",
         name = "Notification Message",
-        description = "%USERNAME%, %ITEM%, %TEAM%, %REMAINING% and %SOURCE% are replaced",
+        description = "%USERNAME%, %ITEM%, %TILE%, %TEAM%, %REMAINING% and %SOURCE% are replaced",
         position = 25,
         section = announceSection
     )

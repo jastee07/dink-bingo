@@ -3,13 +3,13 @@
  *
  * The spreadsheet is the single source of truth for which team owns which tile.
  * Every mutating path runs inside a script lock so two simultaneous drops of the
- * same item cannot both be recorded.
+ * same logical tile cannot both be recorded.
  *
  * Endpoints (deploy as a web app, execute as *me*, access *anyone*):
  *
  *   GET  ?action=ping
  *   POST {action: "board", token, rsn}
- *   POST {action: "unclaim", admin_token, team, item_id}
+ *   POST {action: "unclaim", admin_token, team, tile_id}
  *   POST {token, rsn, itemId, itemName, quantity, source, claimId}
  *
  * Run `setupSheet()` once from the editor to create the tabs.
@@ -35,7 +35,7 @@ function doGet(e) {
     var action = params.action || 'board';
 
     if (action === 'ping') {
-      return json({ status: 'ok', version: 1 });
+      return json({ status: 'ok', version: 2 });
     }
     if (action === 'board' || action === 'unclaim') {
       return json({ status: 'error', error: 'post_required' });
@@ -80,32 +80,34 @@ function handleBoard(params) {
 
   var rsn = normalizeRsn(params.rsn);
   var team = resolveTeam(rsn);
-  var items = readItems();
+  var catalog = readTiles();
   var claims = readClaims();
 
   var out = [];
   var remaining = 0;
-  for (var i = 0; i < items.length; i++) {
-    var item = items[i];
-    var claim = team ? claims[claimKey(team, item.id)] : null;
+  for (var i = 0; i < catalog.tiles.length; i++) {
+    var tile = catalog.tiles[i];
+    var claim = team ? claims[claimKey(team, tile.id)] : null;
     if (!claim) remaining++;
     out.push({
-      id: item.id,
-      name: item.name,
-      points: item.points,
+      id: tile.id,
+      name: tile.name,
+      points: tile.points,
       claimed: !!claim,
       claimedBy: claim ? claim.rsn : null,
-      claimedAt: claim ? claim.claimedAt : null
+      claimedAt: claim ? claim.claimedAt : null,
+      claimedItem: claim ? { id: claim.itemId, name: claim.itemName } : null,
+      options: tile.options
     });
   }
 
   return json({
     status: 'ok',
     team: team,
-    remaining: team ? remaining : items.length,
-    total: items.length,
+    remaining: team ? remaining : catalog.tiles.length,
+    total: catalog.tiles.length,
     eventOpen: eventOpen(cfg),
-    items: out
+    tiles: out
   });
 }
 
@@ -135,6 +137,7 @@ function handleClaim(body) {
   }
 
   try {
+    var catalog = readTiles();
     var claims = readClaims();
 
     // Idempotency first: a retried POST must return the original outcome rather
@@ -142,16 +145,18 @@ function handleClaim(body) {
     if (body.claimId) {
       var prior = findClaimById(claims, body.claimId);
       if (prior) {
-        var replayItem = findItem(prior.itemId);
+        var replayTile = catalog.byTileId[tileMapKey(prior.tileId)];
         return json({
           status: 'claimed',
           replay: true,
           team: prior.team,
+          tileId: prior.tileId,
+          tileName: prior.tileName,
           itemId: prior.itemId,
           itemName: prior.itemName,
-          points: replayItem ? replayItem.points : 0,
-          total: readItems().length,
-          remaining: countRemaining(prior.team, claims)
+          points: replayTile ? replayTile.points : 0,
+          total: catalog.tiles.length,
+          remaining: countRemaining(prior.team, claims, catalog.tiles)
         });
       }
     }
@@ -167,29 +172,36 @@ function handleClaim(body) {
       return json({ status: 'not_on_team' });
     }
 
-    var item = findItem(itemId);
-    if (!item) {
+    var tile = catalog.byItemId[itemId];
+    if (!tile) {
       auditLocked(rsn, itemId, 'not_on_board', body, '');
       return json({ status: 'not_on_board' });
     }
+    body.tileId = tile.id;
+    var item = findOption(tile, itemId);
 
-    var existing = claims[claimKey(team, itemId)];
+    var existing = claims[claimKey(team, tile.id)];
     if (existing) {
       auditLocked(rsn, itemId, 'duplicate', body, 'held by ' + existing.rsn);
       return json({
         status: 'duplicate',
         team: team,
-        itemId: itemId,
-        itemName: item.name,
+        tileId: tile.id,
+        tileName: tile.name,
+        itemId: existing.itemId,
+        itemName: existing.itemName,
         claimedBy: existing.rsn,
         claimedAt: existing.claimedAt,
-        remaining: countRemaining(team, claims)
+        remaining: countRemaining(team, claims, catalog.tiles),
+        total: catalog.tiles.length
       });
     }
 
     var now = new Date();
     sheet(SHEET_CLAIMS).appendRow([
       team,
+      tile.id,
+      tile.name,
       itemId,
       item.name,
       rsn,
@@ -199,25 +211,38 @@ function handleClaim(body) {
     ]);
     SpreadsheetApp.flush();
 
-    auditLocked(rsn, itemId, 'claimed', body, 'team ' + team);
+    auditLocked(rsn, itemId, 'claimed', body, 'team ' + team + ', tile ' + tile.id);
 
     // Recount with the new row included.
-    claims[claimKey(team, itemId)] = { rsn: rsn, claimedAt: now };
-    var remaining = countRemaining(team, claims);
+    claims[claimKey(team, tile.id)] = {
+      team: team,
+      tileId: tile.id,
+      tileName: tile.name,
+      itemId: itemId,
+      itemName: item.name,
+      rsn: rsn,
+      claimedAt: now,
+      claimId: body.claimId || ''
+    };
+    var remaining = countRemaining(team, claims, catalog.tiles);
 
     if (truthy(cfg.announce_from_backend) && cfg.discord_webhook) {
-      postDiscord(cfg.discord_webhook, rsn + ' claimed **' + item.name + '** for ' + team +
+      var label = item.name === tile.name ? '**' + item.name + '**' :
+        '**' + item.name + '** for **' + tile.name + '**';
+      postDiscord(cfg.discord_webhook, rsn + ' claimed ' + label + ' for ' + team +
         ' — ' + remaining + ' tiles left');
     }
 
     return json({
       status: 'claimed',
       team: team,
+      tileId: tile.id,
+      tileName: tile.name,
       itemId: itemId,
       itemName: item.name,
-      points: item.points,
+      points: tile.points,
       remaining: remaining,
-      total: readItems().length
+      total: catalog.tiles.length
     });
   } finally {
     lock.releaseLock();
@@ -235,8 +260,8 @@ function handleUnclaim(params) {
   }
 
   var team = String(params.team || '').trim();
-  var itemId = parseInt(params.item_id, 10);
-  if (!team || isNaN(itemId)) {
+  var tileId = String(params.tile_id || '').trim();
+  if (!team || !tileId) {
     return json({ status: 'error', error: 'bad_request' });
   }
 
@@ -248,15 +273,18 @@ function handleUnclaim(params) {
   try {
     var sh = sheet(SHEET_CLAIMS);
     var values = sh.getDataRange().getValues();
+    var columns = headerMap(values[0]);
     for (var r = values.length - 1; r >= 1; r--) {
-      if (String(values[r][0]).trim() === team && parseInt(values[r][1], 10) === itemId) {
+      if (String(values[r][columns.team]).trim() === team &&
+          String(values[r][columns.tile_id]).trim() === tileId) {
+        var itemId = parseInt(values[r][columns.item_id], 10);
         sh.deleteRow(r + 1);
         SpreadsheetApp.flush();
-        auditLocked('ADMIN', itemId, 'unclaimed', params, 'team ' + team);
-        return json({ status: 'unclaimed', team: team, itemId: itemId });
+        auditLocked('ADMIN', itemId, 'unclaimed', params, 'team ' + team + ', tile ' + tileId);
+        return json({ status: 'unclaimed', team: team, tileId: tileId, itemId: itemId });
       }
     }
-    return json({ status: 'not_claimed', team: team, itemId: itemId });
+    return json({ status: 'not_claimed', team: team, tileId: tileId });
   } finally {
     lock.releaseLock();
   }
@@ -282,44 +310,91 @@ function readConfig() {
   return cfg;
 }
 
-function readItems() {
+function readTiles() {
   var values = sheet(SHEET_ITEMS).getDataRange().getValues();
-  var items = [];
+  var columns = requireColumns(values[0], SHEET_ITEMS,
+    ['tile_id', 'tile_name', 'item_id', 'item_name', 'points']);
+  var rows = [];
   for (var r = 1; r < values.length; r++) {
-    var id = parseInt(values[r][0], 10);
-    if (isNaN(id)) continue;
-    items.push({
-      id: id,
-      name: String(values[r][1] || '').trim(),
-      points: values[r][2] === '' || values[r][2] == null ? 1 : Number(values[r][2])
+    if (values[r].join('') === '') continue;
+    rows.push({
+      tileId: String(values[r][columns.tile_id] || '').trim(),
+      tileName: String(values[r][columns.tile_name] || '').trim(),
+      itemId: parseInt(values[r][columns.item_id], 10),
+      itemName: String(values[r][columns.item_name] || '').trim(),
+      points: values[r][columns.points] === '' || values[r][columns.points] == null ?
+        1 : Number(values[r][columns.points])
     });
   }
-  return items;
+  return buildTileCatalog(rows);
 }
 
-function findItem(itemId) {
-  var items = readItems();
-  for (var i = 0; i < items.length; i++) {
-    if (items[i].id === itemId) return items[i];
+/** Build and validate the logical board while preserving first-seen tile order. */
+function buildTileCatalog(rows) {
+  var catalog = { tiles: [], byTileId: {}, byItemId: {} };
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    if (!row.tileId || !row.tileName || isNaN(row.itemId) || !row.itemName ||
+        !isFinite(row.points)) {
+      throw new Error('invalid Items row ' + (i + 2));
+    }
+    if (catalog.byItemId[row.itemId]) {
+      throw new Error('item_id ' + row.itemId + ' appears more than once');
+    }
+
+    var tileKey = tileMapKey(row.tileId);
+    var tile = catalog.byTileId[tileKey];
+    if (!tile) {
+      tile = {
+        id: row.tileId,
+        name: row.tileName,
+        points: row.points,
+        options: []
+      };
+      catalog.byTileId[tileKey] = tile;
+      catalog.tiles.push(tile);
+    } else if (tile.name !== row.tileName || tile.points !== row.points) {
+      throw new Error('tile_id ' + row.tileId + ' has inconsistent name or points');
+    }
+
+    tile.options.push({ id: row.itemId, name: row.itemName });
+    catalog.byItemId[row.itemId] = tile;
+  }
+  return catalog;
+}
+
+function findOption(tile, itemId) {
+  for (var i = 0; i < tile.options.length; i++) {
+    if (tile.options[i].id === itemId) return tile.options[i];
   }
   return null;
 }
 
-/** @return {Object} keyed by `team||itemId` */
+/** @return {Object} keyed by `team||tileId` */
 function readClaims() {
   var values = sheet(SHEET_CLAIMS).getDataRange().getValues();
+  var columns = requireColumns(values[0], SHEET_CLAIMS,
+    ['team', 'tile_id', 'tile_name', 'item_id', 'item_name', 'rsn', 'claimed_at', 'claim_id']);
   var claims = {};
   for (var r = 1; r < values.length; r++) {
-    var team = String(values[r][0]).trim();
-    var itemId = parseInt(values[r][1], 10);
-    if (!team || isNaN(itemId)) continue;
-    claims[claimKey(team, itemId)] = {
+    var team = String(values[r][columns.team] || '').trim();
+    var tileId = String(values[r][columns.tile_id] || '').trim();
+    var itemId = parseInt(values[r][columns.item_id], 10);
+    if (!team || !tileId || isNaN(itemId)) continue;
+    var key = claimKey(team, tileId);
+    if (claims[key]) {
+      throw new Error('multiple Claims rows for team ' + team + ' and tile_id ' + tileId);
+    }
+    claims[key] = {
       team: team,
+      tileId: tileId,
+      tileName: String(values[r][columns.tile_name] || ''),
       itemId: itemId,
-      itemName: String(values[r][2] || ''),
-      rsn: String(values[r][3] || ''),
-      claimedAt: values[r][4] ? new Date(values[r][4]).toISOString() : null,
-      claimId: String(values[r][5] || '')
+      itemName: String(values[r][columns.item_name] || ''),
+      rsn: String(values[r][columns.rsn] || ''),
+      claimedAt: values[r][columns.claimed_at] ?
+        new Date(values[r][columns.claimed_at]).toISOString() : null,
+      claimId: String(values[r][columns.claim_id] || '')
     };
   }
   return claims;
@@ -332,17 +407,38 @@ function findClaimById(claims, claimId) {
   return null;
 }
 
-function claimKey(team, itemId) {
-  return team + '||' + itemId;
+function claimKey(team, tileId) {
+  return JSON.stringify([String(team), String(tileId)]);
 }
 
-function countRemaining(team, claims) {
-  var items = readItems();
+function tileMapKey(tileId) {
+  return '$' + String(tileId);
+}
+
+function countRemaining(team, claims, tiles) {
   var n = 0;
-  for (var i = 0; i < items.length; i++) {
-    if (!claims[claimKey(team, items[i].id)]) n++;
+  for (var i = 0; i < tiles.length; i++) {
+    if (!claims[claimKey(team, tiles[i].id)]) n++;
   }
   return n;
+}
+
+function headerMap(headers) {
+  var columns = {};
+  for (var i = 0; i < headers.length; i++) {
+    columns[String(headers[i] || '').trim()] = i;
+  }
+  return columns;
+}
+
+function requireColumns(headers, sheetName, required) {
+  var columns = headerMap(headers || []);
+  for (var i = 0; i < required.length; i++) {
+    if (columns[required[i]] == null) {
+      throw new Error(sheetName + ' schema is outdated; run upgradeGroupedTiles()');
+    }
+  }
+  return columns;
 }
 
 function resolveTeam(rsn) {
@@ -382,7 +478,8 @@ function auditLocked(rsn, itemId, result, payload, notes) {
       itemId == null ? '' : itemId,
       result,
       notes || '',
-      JSON.stringify(sanitizeAuditPayload(payload)).slice(0, 4000)
+      JSON.stringify(sanitizeAuditPayload(payload)).slice(0, 4000),
+      payload && (payload.tileId || payload.tile_id) || ''
     ]);
   } catch (err) {
     // Auditing must never break a claim.
@@ -396,7 +493,8 @@ function auditLocked(rsn, itemId, result, payload, notes) {
  */
 function sanitizeAuditPayload(payload) {
   var input = payload || {};
-  var allowed = ['action', 'rsn', 'itemId', 'itemName', 'quantity', 'source', 'claimId', 'team', 'item_id'];
+  var allowed = ['action', 'rsn', 'itemId', 'itemName', 'quantity', 'source', 'claimId',
+    'team', 'tileId', 'tile_id'];
   var safe = {};
   for (var i = 0; i < allowed.length; i++) {
     var key = allowed[i];
@@ -459,10 +557,12 @@ function setupSheet() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
 
   var tabs = {};
-  tabs[SHEET_ITEMS] = ['item_id', 'item_name', 'points', 'notes'];
+  tabs[SHEET_ITEMS] = ['tile_id', 'tile_name', 'item_id', 'item_name', 'points', 'notes'];
   tabs[SHEET_TEAMS] = ['rsn', 'team'];
-  tabs[SHEET_CLAIMS] = ['team', 'item_id', 'item_name', 'rsn', 'claimed_at', 'claim_id', 'source'];
-  tabs[SHEET_AUDIT] = ['ts', 'rsn', 'item_id', 'result', 'notes', 'raw_payload'];
+  tabs[SHEET_CLAIMS] = [
+    'team', 'tile_id', 'tile_name', 'item_id', 'item_name', 'rsn', 'claimed_at', 'claim_id', 'source'
+  ];
+  tabs[SHEET_AUDIT] = ['ts', 'rsn', 'item_id', 'result', 'notes', 'raw_payload', 'tile_id'];
   tabs[SHEET_CONFIG] = ['key', 'value'];
 
   for (var name in tabs) {
@@ -486,10 +586,17 @@ function setupSheet() {
   }
 
   var items = ss.getSheetByName(SHEET_ITEMS);
+  if (headerMap(items.getDataRange().getValues()[0]).tile_id != null) {
+    items.getRange('A:A').setNumberFormat('@');
+  }
   if (items.getLastRow() <= 1) {
-    items.appendRow([11832, 'Bandos chestplate', 1, '']);
-    items.appendRow([21034, 'Dexterous prayer scroll', 1, '']);
-    items.appendRow([4151, 'Abyssal whip', 1, '']);
+    items.appendRow(['11832', 'Bandos chestplate', 11832, 'Bandos chestplate', 1, '']);
+    items.appendRow(['21034', 'Dexterous prayer scroll', 21034, 'Dexterous prayer scroll', 1, '']);
+    items.appendRow(['4151', 'Abyssal whip', 4151, 'Abyssal whip', 1, '']);
+  }
+  var claims = ss.getSheetByName(SHEET_CLAIMS);
+  if (headerMap(claims.getDataRange().getValues()[0]).tile_id != null) {
+    claims.getRange('B:B').setNumberFormat('@');
   }
 
   var leaderboard = ss.getSheetByName(SHEET_LEADERBOARD);
@@ -499,6 +606,78 @@ function setupSheet() {
   }
 
   SpreadsheetApp.getUi().alert('Dink Bingo tabs and leaderboard are ready. Fill in Items and Teams, then Deploy > New deployment > Web app.');
+}
+
+/**
+ * Upgrades the original one-item-per-tile schema without deleting source data.
+ * Existing rows remain single-item tiles until the organizer assigns a shared tile_id.
+ */
+function upgradeGroupedTiles() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
+    throw new Error('Could not acquire the script lock');
+  }
+  try {
+    var items = sheet(SHEET_ITEMS);
+    var itemValues = items.getDataRange().getValues();
+    var itemColumns = headerMap(itemValues[0]);
+    if (itemColumns.tile_id == null) {
+      if (itemColumns.item_id == null || itemColumns.item_name == null) {
+        throw new Error('unsupported Items schema: missing item_id or item_name');
+      }
+      items.insertColumnsBefore(1, 2);
+      items.getRange(1, 1, 1, 2).setValues([['tile_id', 'tile_name']]);
+      if (itemValues.length > 1) {
+        var itemBackfill = [];
+        for (var i = 1; i < itemValues.length; i++) {
+          itemBackfill.push([
+            String(itemValues[i][itemColumns.item_id] || ''),
+            String(itemValues[i][itemColumns.item_name] || '')
+          ]);
+        }
+        items.getRange(2, 1, itemBackfill.length, 2).setValues(itemBackfill);
+      }
+    }
+    items.getRange('A:A').setNumberFormat('@');
+
+    var claims = sheet(SHEET_CLAIMS);
+    var claimValues = claims.getDataRange().getValues();
+    var claimColumns = headerMap(claimValues[0]);
+    if (claimColumns.tile_id == null) {
+      if (claimColumns.item_id == null || claimColumns.item_name == null) {
+        throw new Error('unsupported Claims schema: missing item_id or item_name');
+      }
+      claims.insertColumnsAfter(1, 2);
+      claims.getRange(1, 2, 1, 2).setValues([['tile_id', 'tile_name']]);
+      if (claimValues.length > 1) {
+        var claimBackfill = [];
+        for (var c = 1; c < claimValues.length; c++) {
+          claimBackfill.push([
+            String(claimValues[c][claimColumns.item_id] || ''),
+            String(claimValues[c][claimColumns.item_name] || '')
+          ]);
+        }
+        claims.getRange(2, 2, claimBackfill.length, 2).setValues(claimBackfill);
+      }
+    }
+    claims.getRange('B:B').setNumberFormat('@');
+
+    var auditSheet = sheet(SHEET_AUDIT);
+    var auditValues = auditSheet.getDataRange().getValues();
+    if (headerMap(auditValues[0]).tile_id == null) {
+      auditSheet.getRange(1, auditValues[0].length + 1).setValue('tile_id');
+    }
+
+    SpreadsheetApp.flush();
+    setupLeaderboard(sheet(SHEET_LEADERBOARD));
+  } finally {
+    lock.releaseLock();
+  }
+
+  SpreadsheetApp.getUi().alert(
+    'Grouped-tile columns were added and existing rows remain single-item tiles. ' +
+    'Assign the same tile_id, tile_name, and points to alternative Items rows, then deploy a new version.'
+  );
 }
 
 /**
@@ -581,54 +760,56 @@ function setupLeaderboard(sh) {
   );
 
   sh.getRange('A4:E4').setValues([
-    ['Team', 'Claimed', 'Points', 'Remaining Items', 'Remaining Points']
+    ['Team', 'Claimed', 'Points', 'Remaining Tiles', 'Remaining Points']
   ]);
   sh.getRange('A5').setFormula(
     '=IFERROR(SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),"")'
   );
   sh.getRange('B5').setFormula(
     '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
-    'itemIds,FILTER(Items!A2:A,Items!A2:A<>""),' +
-    'MAP(teams,LAMBDA(team,SUM(MAP(itemIds,LAMBDA(itemId,' +
-    'IF(COUNTIFS(Claims!A2:A,team,Claims!B2:B,itemId)>0,1,0)))))),"")'
+    'tileIds,UNIQUE(FILTER(Items!A2:A,Items!A2:A<>"")),' +
+    'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,LAMBDA(tileId,' +
+    'IF(COUNTIFS(Claims!A2:A,team,Claims!B2:B,tileId)>0,1,0)))))),"")'
   );
   sh.getRange('C5').setFormula(
     '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
-    'itemIds,FILTER(Items!A2:A,Items!A2:A<>""),' +
-    'itemPoints,FILTER(Items!C2:C,Items!A2:A<>""),' +
-    'MAP(teams,LAMBDA(team,SUM(MAP(itemIds,itemPoints,LAMBDA(itemId,points,' +
-    'IF(COUNTIFS(Claims!A2:A,team,Claims!B2:B,itemId)>0,' +
+    'tileIds,UNIQUE(FILTER(Items!A2:A,Items!A2:A<>"")),' +
+    'tilePoints,MAP(tileIds,LAMBDA(tileId,INDEX(FILTER(Items!E2:E,Items!A2:A=tileId),1))),' +
+    'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,tilePoints,LAMBDA(tileId,points,' +
+    'IF(COUNTIFS(Claims!A2:A,team,Claims!B2:B,tileId)>0,' +
     'IF(points="",1,points),0))))))),"")'
   );
   sh.getRange('D5').setFormula(
     '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
-    'itemIds,FILTER(Items!A2:A,Items!A2:A<>""),' +
-    'MAP(teams,LAMBDA(team,SUM(MAP(itemIds,LAMBDA(itemId,' +
-    'IF(COUNTIFS(Claims!A2:A,team,Claims!B2:B,itemId)=0,1,0)))))),"")'
+    'tileIds,UNIQUE(FILTER(Items!A2:A,Items!A2:A<>"")),' +
+    'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,LAMBDA(tileId,' +
+    'IF(COUNTIFS(Claims!A2:A,team,Claims!B2:B,tileId)=0,1,0)))))),"")'
   );
   sh.getRange('E5').setFormula(
     '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
-    'itemIds,FILTER(Items!A2:A,Items!A2:A<>""),' +
-    'itemPoints,FILTER(Items!C2:C,Items!A2:A<>""),' +
-    'MAP(teams,LAMBDA(team,SUM(MAP(itemIds,itemPoints,LAMBDA(itemId,points,' +
-    'IF(COUNTIFS(Claims!A2:A,team,Claims!B2:B,itemId)=0,' +
+    'tileIds,UNIQUE(FILTER(Items!A2:A,Items!A2:A<>"")),' +
+    'tilePoints,MAP(tileIds,LAMBDA(tileId,INDEX(FILTER(Items!E2:E,Items!A2:A=tileId),1))),' +
+    'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,tilePoints,LAMBDA(tileId,points,' +
+    'IF(COUNTIFS(Claims!A2:A,team,Claims!B2:B,tileId)=0,' +
     'IF(points="",1,points),0))))))),"")'
   );
 
-  sh.getRange('A25:C25').setValues([['Item ID', 'Item', 'Points']]);
+  sh.getRange('A25:C25').setValues([['Tile ID', 'Tile', 'Points']]);
   sh.getRange('A26').setFormula(
-    '=IFERROR(FILTER(Items!A2:C,Items!A2:A<>""),"")'
+    '=IFERROR(UNIQUE(FILTER({Items!A2:A,Items!B2:B,Items!E2:E},Items!A2:A<>"")),"")'
   );
   sh.getRange('D25').setFormula(
     '=IFERROR(TRANSPOSE(SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>"")))),"")'
   );
   sh.getRange('D26').setFormula(
-    '=IFERROR(LET(itemIds,FILTER(Items!A2:A,Items!A2:A<>""),' +
+    '=IFERROR(LET(tileIds,UNIQUE(FILTER(Items!A2:A,Items!A2:A<>"")),' +
     'teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
-    'MAKEARRAY(ROWS(itemIds),ROWS(teams),LAMBDA(rowIndex,columnIndex,' +
-    'LET(team,INDEX(teams,columnIndex,1),itemId,INDEX(itemIds,rowIndex,1),' +
-    'claimedBy,IFNA(INDEX(FILTER(Claims!D2:D,Claims!A2:A=team,' +
-    'Claims!B2:B=itemId),1),""),IF(claimedBy="","—","✓ "&claimedBy))))),"")'
+    'MAKEARRAY(ROWS(tileIds),ROWS(teams),LAMBDA(rowIndex,columnIndex,' +
+    'LET(team,INDEX(teams,columnIndex,1),tileId,INDEX(tileIds,rowIndex,1),' +
+    'claimedBy,IFNA(INDEX(FILTER(Claims!F2:F,Claims!A2:A=team,' +
+    'Claims!B2:B=tileId),1),""),winningItem,IFNA(INDEX(FILTER(Claims!E2:E,' +
+    'Claims!A2:A=team,Claims!B2:B=tileId),1),""),' +
+    'IF(claimedBy="","—","✓ "&claimedBy&" — "&winningItem))))),"")'
   );
 
   sh.getRange('A1').setFontSize(16).setFontWeight('bold');

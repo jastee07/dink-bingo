@@ -38,14 +38,14 @@ public class BingoResponses {
         int total;
         boolean eventOpen;
         @Nullable
-        List<BoardItem> items;
+        List<BoardTile> tiles;
         @Nullable
         String error;
     }
 
     @Data
-    public static class BoardItem {
-        int id;
+    public static class BoardTile {
+        String id;
         String name;
         int points;
         boolean claimed;
@@ -53,6 +53,16 @@ public class BingoResponses {
         String claimedBy;
         @Nullable
         String claimedAt;
+        @Nullable
+        BoardItem claimedItem;
+        @Nullable
+        List<BoardItem> options;
+    }
+
+    @Data
+    public static class BoardItem {
+        int id;
+        String name;
     }
 
     @Data
@@ -72,6 +82,10 @@ public class BingoResponses {
         boolean replay;
         @Nullable
         String team;
+        @Nullable
+        String tileId;
+        @Nullable
+        String tileName;
         int itemId;
         @Nullable
         String itemName;

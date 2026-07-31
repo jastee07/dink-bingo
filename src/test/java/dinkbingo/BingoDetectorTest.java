@@ -127,6 +127,32 @@ class BingoDetectorTest {
         verify(bingoClient, times(1)).submitClaim(any());
     }
 
+    @Test
+    void alternativesShareInFlightState() {
+        detector.setBoard(board(group("rare-drop", "Any rare drop",
+            new BingoItem(WHIP, "Abyssal whip"),
+            new BingoItem(SCROLL, "Dexterous prayer scroll"))));
+
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+        detector.onLoot(loot(SCROLL, 1), "Chambers of Xeric");
+
+        verify(bingoClient, times(1)).submitClaim(any());
+    }
+
+    @Test
+    void resolvedAlternativeSuppressesTheRestOfTheTile() {
+        detector.setBoard(board(group("rare-drop", "Any rare drop",
+            new BingoItem(WHIP, "Abyssal whip"),
+            new BingoItem(SCROLL, "Dexterous prayer scroll"))));
+        when(bingoClient.submitClaim(any()))
+            .thenReturn(CompletableFuture.completedFuture(response(BingoResponses.CLAIMED)));
+
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+        detector.onLoot(loot(SCROLL, 1), "Chambers of Xeric");
+
+        verify(bingoClient, times(1)).submitClaim(any());
+    }
+
     /**
      * BingoPlugin deliberately forwards ServerNpcLoot, NpcLootReceived and LootReceived without
      * trying to work out which one "owns" a given kill, because upstream keeps moving bosses
@@ -206,6 +232,19 @@ class BingoDetectorTest {
         ClaimRequest claim = captureClaim();
         assertEquals(SCROLL, claim.getItemId());
         assertEquals("Collection log", claim.getSource());
+    }
+
+    @Test
+    void claimsAGroupedAlternativeFromCollectionLogByName() {
+        detector.setBoard(board(group("rare-drop", "Any rare drop",
+            new BingoItem(WHIP, "Abyssal whip"),
+            new BingoItem(SCROLL, "Dexterous prayer scroll"))));
+
+        detector.onGameMessage("New item added to your collection log: Dexterous prayer scroll");
+
+        ClaimRequest claim = captureClaim();
+        assertEquals(SCROLL, claim.getItemId());
+        assertEquals("Dexterous prayer scroll", claim.getItemName());
     }
 
     @Test
@@ -295,22 +334,30 @@ class BingoDetectorTest {
         return Collections.singletonList(new ItemStack(id, quantity));
     }
 
-    private static BingoBoard board(BingoItem... items) {
-        return new BingoBoard("Team One", Arrays.asList(items), true);
+    private static BingoBoard board(BingoTile... tiles) {
+        return new BingoBoard("Team One", Arrays.asList(tiles), true);
     }
 
-    private static BingoItem open(int id, String name) {
-        return new BingoItem(id, name, 1, false, null, null);
+    private static BingoTile open(int id, String name) {
+        return group(String.valueOf(id), name, new BingoItem(id, name));
     }
 
-    private static BingoItem claimed(int id, String name, String by) {
-        return new BingoItem(id, name, 1, true, by, "2026-07-30T00:00:00Z");
+    private static BingoTile claimed(int id, String name, String by) {
+        BingoItem item = new BingoItem(id, name);
+        return new BingoTile(String.valueOf(id), name, 1, Collections.singletonList(item),
+            true, by, "2026-07-30T00:00:00Z", item);
+    }
+
+    private static BingoTile group(String id, String name, BingoItem... options) {
+        return new BingoTile(id, name, 1, Arrays.asList(options), false, null, null, null);
     }
 
     private static ClaimResponse response(String status) {
         ClaimResponse response = new ClaimResponse();
         response.setStatus(status);
         response.setTeam("Team One");
+        response.setTileId(String.valueOf(WHIP));
+        response.setTileName("Abyssal whip");
         response.setItemId(WHIP);
         response.setItemName("Abyssal whip");
         response.setRemaining(1);

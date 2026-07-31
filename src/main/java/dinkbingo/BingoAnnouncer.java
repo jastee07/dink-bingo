@@ -51,14 +51,16 @@ public class BingoAnnouncer {
         }
 
         String itemName = claim.getItemName() != null ? claim.getItemName() : "an item";
+        String tileName = claim.getTileName() != null ? claim.getTileName() : itemName;
         String team = claim.getTeam() != null ? claim.getTeam() : "their team";
-        post(claim, source, itemName, team, config.notifyMessage(), "Bingo tile claimed");
+        post(claim, source, itemName, tileName, team, config.notifyMessage(), "Bingo tile claimed");
     }
 
     private void post(
         ClaimResponse claim,
         String source,
         String itemName,
+        String tileName,
         String team,
         String text,
         String title
@@ -73,12 +75,17 @@ public class BingoAnnouncer {
 
         Map<String, Object> replacements = new HashMap<>();
         replacements.put("%ITEM%", linkReplacement(itemName, WIKI_SEARCH_URL + urlEncode(itemName)));
+        replacements.put("%TILE%", textReplacement(tileName));
         replacements.put("%TEAM%", textReplacement(team));
         replacements.put("%REMAINING%", textReplacement(String.valueOf(claim.getRemaining())));
         replacements.put("%SOURCE%", textReplacement(source != null ? source : "unknown"));
         data.put("replacements", replacements);
 
-        List<Map<String, Object>> fields = new ArrayList<>(3);
+        List<Map<String, Object>> fields = new ArrayList<>(4);
+        if (!tileName.equalsIgnoreCase(itemName)) {
+            fields.add(field("Bingo Tile", tileName, false));
+            fields.add(field("Winning Item", itemName, false));
+        }
         fields.add(field("Team", team, true));
         fields.add(field("Tiles Remaining", claim.getRemaining() + " / " + claim.getTotal(), true));
         if (source != null && !source.isEmpty()) {
@@ -89,6 +96,8 @@ public class BingoAnnouncer {
         Map<String, Object> metadata = new HashMap<>();
         metadata.put("itemId", claim.getItemId());
         metadata.put("itemName", itemName);
+        metadata.put("tileId", claim.getTileId());
+        metadata.put("tileName", tileName);
         metadata.put("team", team);
         metadata.put("remaining", claim.getRemaining());
         metadata.put("points", claim.getPoints());

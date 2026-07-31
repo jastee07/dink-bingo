@@ -50,16 +50,16 @@ public class BingoDetector {
     private volatile BingoBoard board = BingoBoard.EMPTY;
 
     /**
-     * Item ids with a claim POST in flight. Two events for one kill (RuneLite fires both
+     * Logical tile ids with a claim POST in flight. Two events for one kill (RuneLite fires both
      * {@code ServerNpcLoot} and {@code NpcLootReceived} for some NPCs) must not both submit.
      */
-    private final Set<Integer> inFlight = new CopyOnWriteArraySet<>();
+    private final Set<String> inFlight = new CopyOnWriteArraySet<>();
 
     /**
-     * Item ids the backend has already resolved for us this session. The board refresh is
+     * Logical tile ids the backend has already resolved for us this session. The board refresh is
      * authoritative, but this stops a second drop re-asking before the refresh lands.
      */
-    private final Set<Integer> resolved = new CopyOnWriteArraySet<>();
+    private final Set<String> resolved = new CopyOnWriteArraySet<>();
     private final AtomicLong generation = new AtomicLong();
 
     /**
@@ -115,10 +115,12 @@ public class BingoDetector {
         // The board already carries item names, so match on those rather than maintaining a
         // separate name -> id index just for this path.
         String itemName = matcher.group("itemName").trim();
-        for (BingoItem item : board.getItems()) {
-            if (item.getName().equalsIgnoreCase(itemName)) {
-                submitIfClaimable(item.getId(), 1, "Collection log");
-                return;
+        for (BingoTile tile : board.getTiles()) {
+            for (BingoItem option : tile.getOptions()) {
+                if (option.getName().equalsIgnoreCase(itemName)) {
+                    submitIfClaimable(option.getId(), 1, "Collection log");
+                    return;
+                }
             }
         }
     }
@@ -128,24 +130,27 @@ public class BingoDetector {
     // ------------------------------------------------------------------
 
     boolean shouldSubmit(int itemId) {
+        BingoTile tile = board.getByItemId().get(itemId);
         return board.isClaimable(itemId)
-            && !inFlight.contains(itemId)
-            && !resolved.contains(itemId);
+            && tile != null
+            && !inFlight.contains(tile.getId())
+            && !resolved.contains(tile.getId());
     }
 
     private void submitIfClaimable(int itemId, int quantity, String source) {
         if (!shouldSubmit(itemId)) {
             return;
         }
-        if (!inFlight.add(itemId)) {
-            return; // lost the race against a simultaneous event for the same item
+        BingoTile tile = board.getByItemId().get(itemId);
+        if (tile == null || !inFlight.add(tile.getId())) {
+            return; // lost the race against another event for this logical tile
         }
 
-        BingoItem tile = board.getById().get(itemId);
+        BingoItem option = board.findOption(itemId);
         ClaimRequest claim = new ClaimRequest();
         claim.setRsn(getPlayerName());
         claim.setItemId(itemId);
-        claim.setItemName(tile != null ? tile.getName() : String.valueOf(itemId));
+        claim.setItemName(option != null ? option.getName() : String.valueOf(itemId));
         claim.setQuantity(quantity);
         claim.setSource(source != null ? source : "");
         claim.setClaimId(UUID.randomUUID().toString());
@@ -164,11 +169,11 @@ public class BingoDetector {
                     return;
                 }
                 if (response.isResolvedOutcome()) {
-                    resolved.add(itemId);
+                    resolved.add(tile.getId());
                 }
                 claimListener.accept(response, claim.getSource());
             } finally {
-                inFlight.remove(itemId);
+                inFlight.remove(tile.getId());
             }
         });
     }

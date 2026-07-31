@@ -5,6 +5,7 @@ import com.google.gson.JsonSyntaxException;
 import dinkbingo.BingoResponses.BoardItem;
 import dinkbingo.BingoResponses.BoardRequest;
 import dinkbingo.BingoResponses.BoardResponse;
+import dinkbingo.BingoResponses.BoardTile;
 import dinkbingo.BingoResponses.ClaimRequest;
 import dinkbingo.BingoResponses.ClaimResponse;
 import lombok.extern.slf4j.Slf4j;
@@ -74,7 +75,7 @@ public class BingoClient {
             .build();
 
         return executeWithRetry(request, BoardResponse.class).thenApply(res -> {
-            if (res == null || res.getItems() == null) {
+            if (res == null || res.getTiles() == null) {
                 log.debug("Board fetch returned nothing usable");
                 return null;
             }
@@ -82,12 +83,20 @@ public class BingoClient {
                 log.warn("Bingo backend rejected board fetch: {}", res.getError());
                 return null;
             }
-            List<BingoItem> items = new ArrayList<>(res.getItems().size());
-            for (BoardItem item : res.getItems()) {
-                items.add(new BingoItem(item.getId(), item.getName(), item.getPoints(),
-                    item.isClaimed(), item.getClaimedBy(), item.getClaimedAt()));
+            List<BingoTile> tiles = new ArrayList<>(res.getTiles().size());
+            for (BoardTile tile : res.getTiles()) {
+                List<BingoItem> options = new ArrayList<>();
+                if (tile.getOptions() != null) {
+                    for (BoardItem option : tile.getOptions()) {
+                        options.add(new BingoItem(option.getId(), option.getName()));
+                    }
+                }
+                BoardItem won = tile.getClaimedItem();
+                BingoItem claimedItem = won == null ? null : new BingoItem(won.getId(), won.getName());
+                tiles.add(new BingoTile(tile.getId(), tile.getName(), tile.getPoints(), options,
+                    tile.isClaimed(), tile.getClaimedBy(), tile.getClaimedAt(), claimedItem));
             }
-            return new BingoBoard(res.getTeam(), items, res.isEventOpen());
+            return new BingoBoard(res.getTeam(), tiles, res.isEventOpen());
         });
     }
 

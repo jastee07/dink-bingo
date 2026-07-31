@@ -10,9 +10,18 @@ whether a tile is claimed — it asks, and only announces when the answer is `cl
 3. Run `setupSheet` once from the editor (approve the permission prompt). This creates the
    `Items`, `Teams`, `Claims`, `Audit`, `Config`, and `Leaderboard` tabs and generates a
    `token` and `admin_token`.
-4. Fill in `Items` (`item_id` is the canonical OSRS item id — get it from the wiki or
-   `https://prices.runescape.wiki/api/v1/osrs/mapping`) and `Teams` (`rsn` → `team`). Team
-   names are exact identifiers, so use identical spelling and capitalization for teammates.
+4. Fill in `Items`. Each accepted item is a row. A single-item tile uses its item id as
+   `tile_id`; alternatives share a `tile_id`, `tile_name`, and points:
+
+   | tile_id | tile_name | item_id | item_name | points |
+   | --- | --- | ---: | --- | ---: |
+   | raids-unique | Any raids unique | 21034 | Dexterous prayer scroll | 3 |
+   | raids-unique | Any raids unique | 21079 | Dragon sword | 3 |
+
+   `item_id` must be the canonical OSRS id from the wiki or
+   `https://prices.runescape.wiki/api/v1/osrs/mapping`. An item id may appear only once;
+   ambiguous rows or inconsistent names/points make board and claim requests fail visibly.
+   Fill in `Teams` as `rsn` → `team`; team names are exact identifiers.
 5. Optionally set `discord_webhook`, `event_start`, `event_end`, and
    `announce_from_backend` in `Config`. Leave `announce_from_backend` as `false` if your
    players run Dink — Dink's own announcement includes a screenshot, the backend's does not.
@@ -25,14 +34,18 @@ the organizer-owned `Config` tab and are never returned by the API. Hiding that 
 not access control.
 
 `Leaderboard` is a formula-driven, read-only view of the authoritative tabs. Its team summary
-shows claimed tiles, earned points, remaining items, and remaining points; the matrix below
-shows every item against every distinct team. A tile claimed by one team remains open for all
+shows claimed tiles, earned points, remaining tiles, and remaining points; the matrix below
+shows every logical tile against every distinct team, including the winning item. A tile
+claimed by one team remains open for all
 other teams. Correct source data in `Items`, `Teams`, or `Claims` rather than typing over the
 spilled formulas.
 
-After replacing `Code.gs` on an existing sheet, run `refreshLeaderboard` once from the Apps
-Script editor. It updates only the derived leaderboard formulas and formatting; it does not
-change `Items`, `Teams`, `Claims`, `Audit`, or `Config`.
+After replacing `Code.gs` on a sheet using the original schema, run `upgradeGroupedTiles`
+once. It adds `tile_id` and `tile_name`, backfills existing rows as single-item tiles, and
+preserves Claims. The old plugin cannot read the grouped board response and the grouped plugin
+cannot read the old response, so perform this between events or in a maintenance window and
+update all players as part of the same cutover. For later formula-only changes, run
+`refreshLeaderboard`.
 
 Re-deploy (**Deploy → Manage deployments → Edit → Version: New**) after any script edit;
 the `/exec` URL stays the same.
@@ -44,15 +57,15 @@ the `/exec` URL stays the same.
 | `GET` | `?action=ping` | Liveness check, no auth |
 | `POST` | body `{action:"board", token, rsn}` | The caller's team, remaining count, and every tile with its claim state |
 | `POST` | body `{token, rsn, itemId, itemName, quantity, source, claimId}` | Attempt a claim |
-| `POST` | body `{action:"unclaim", admin_token, team, item_id}` | Admin undo |
+| `POST` | body `{action:"unclaim", admin_token, team, tile_id}` | Admin undo for one logical tile |
 
 Claim responses: `claimed`, `duplicate`, `not_on_board`, `not_on_team`, `event_closed`,
 or `error`. Only `claimed` triggers an announcement.
 
 ### Concurrency and retries
 
-Every mutating path holds `LockService.getScriptLock()`, so two players hitting the same
-item at the same moment produce exactly one `Claims` row.
+Every mutating path holds `LockService.getScriptLock()`, so two players hitting the same tile
+— even through different accepted items — produce exactly one `Claims` row.
 
 The plugin generates a `claimId` (UUID) per detected drop and reuses it across retries.
 The backend checks `claimId` against existing claims *before* anything else, so a retried
@@ -101,19 +114,20 @@ Idempotent replay — same `claimId`, expect `"status":"claimed","replay":true` 
 curl -sL -X POST "$URL" -H 'Content-Type: application/json' -d '{"token":"'"$TOKEN"'","rsn":"Jake","itemId":21034,"itemName":"Dexterous prayer scroll","quantity":1,"source":"Chambers of Xeric","claimId":"test-claim-001"}'
 ```
 
-Genuine duplicate — new `claimId`, same item and team, expect `"status":"duplicate"`:
+Genuine duplicate — new `claimId`, another item from the same tile and team, expect
+`"status":"duplicate"` and the original winning item:
 
 ```bash
-curl -sL -X POST "$URL" -H 'Content-Type: application/json' -d '{"token":"'"$TOKEN"'","rsn":"Jake","itemId":21034,"itemName":"Dexterous prayer scroll","quantity":1,"source":"Chambers of Xeric","claimId":"test-claim-002"}'
+curl -sL -X POST "$URL" -H 'Content-Type: application/json' -d '{"token":"'"$TOKEN"'","rsn":"Jake","itemId":21079,"itemName":"Dragon sword","quantity":1,"source":"Chambers of Xeric","claimId":"test-claim-002"}'
 ```
 
-Concurrency — fire ten claims for one item at once, expect exactly one `claimed` and nine
-`duplicate`, and exactly one row in `Claims`:
+Concurrency — alternate ten requests across two items in one tile, expect exactly one
+`claimed`, nine `duplicate`, and exactly one row in `Claims`:
 
 ```bash
 for i in $(seq 1 10); do
   curl -sL -X POST "$URL" -H 'Content-Type: application/json' \
-    -d '{"token":"'"$TOKEN"'","rsn":"Jake","itemId":4151,"itemName":"Abyssal whip","claimId":"race-'"$i"'"}' &
+    -d '{"token":"'"$TOKEN"'","rsn":"Jake","itemId":'"$((i % 2 == 0 ? 21034 : 21079))"',"claimId":"race-'"$i"'"}' &
 done; wait
 ```
 
@@ -121,23 +135,25 @@ Admin undo, then re-check the board:
 
 ```bash
 curl -sL -X POST "$URL" -H 'Content-Type: application/json' \
-  -d '{"action":"unclaim","admin_token":"PASTE_ADMIN_TOKEN","team":"Team One","item_id":21034}'
+  -d '{"action":"unclaim","admin_token":"PASTE_ADMIN_TOKEN","team":"Team One","tile_id":"raids-unique"}'
 ```
 
 ## Upgrading an existing sheet
 
-If the sheet received claims using a version from before the security hardening release:
+For every existing sheet using the original one-item schema:
 
 1. Paste the new `Code.gs` and save.
-2. Run `scrubLegacySensitiveData` once from the Apps Script editor.
-3. Replace both `token` and `admin_token` in `Config` with newly generated UUIDs.
-4. Give participants only the new player token.
-5. Delete the retired `account_hash` column from `Claims` if you no longer want the empty
+2. Run `upgradeGroupedTiles` once. It adds and backfills tile columns without deleting rows.
+3. Run `scrubLegacySensitiveData` if the sheet received pre-security-hardening claims.
+4. Replace both `token` and `admin_token` if that security scrub was needed.
+5. Give participants only the current player token.
+6. Delete the retired `account_hash` column from `Claims` if you no longer want the empty
    legacy column.
-6. Deploy a new web-app version. The `/exec` URL stays the same.
+7. Deploy a new web-app version and update players to the grouped-tile plugin build together.
+   The `/exec` URL stays the same.
 
-The helper redacts legacy Audit payloads and clears stored account hashes. Token rotation is
-manual so the organizer controls when existing clients stop working.
+Do not group items that already have separate claims for the same team until the organizer
+has reconciled those rows; the backend deliberately rejects multiple Claims for one team/tile.
 
 ## Trust model
 
@@ -146,7 +162,8 @@ drive-by posts but not a determined participant. The `/exec` URL alone does not 
 board lookup or claim. The mitigations are visibility and reversibility:
 
 - `Audit` records operational claim/unclaim fields but allowlists out tokens and webhook URLs.
-- `Claims` records the normalized RSN, item, source, claim id, and timestamp; it does not
+- `Claims` records the logical tile, winning item, normalized RSN, source, claim id, and
+  timestamp; it does not
   receive a RuneLite account hash.
 - `admin_token` is organizer-only and enables unclaim.
 - `discord_webhook` is read only by Apps Script when backend announcements are enabled and is

@@ -14,21 +14,34 @@ config. Total player-side effort is about a minute.
 3. Run `setupSheet` once from the editor and approve the permission prompt. It creates the
    `Items`, `Teams`, `Claims`, `Audit`, `Config`, and `Leaderboard` tabs and generates a
    `token` and `admin_token`.
-4. **`Items` tab** — one row per tile. `item_id` is the canonical OSRS item id; get it from
-   the wiki URL or `https://prices.runescape.wiki/api/v1/osrs/mapping`.
+4. **`Items` tab** — one row per accepted item. `item_id` is the canonical OSRS item id; get it
+   from the wiki URL or `https://prices.runescape.wiki/api/v1/osrs/mapping`. For a normal tile,
+   use the item id as `tile_id`. For an “any one of X/Y/Z” tile, add one row per alternative
+   with the same `tile_id`, `tile_name`, and points:
+
+   | tile_id | tile_name | item_id | item_name | points |
+   | --- | --- | ---: | --- | ---: |
+   | raids-unique | Any raids unique | 21034 | Dexterous prayer scroll | 3 |
+   | raids-unique | Any raids unique | 21079 | Dragon sword | 3 |
+
+   An item id may appear only once in the tab. Repeated item ids, blank fields, or inconsistent
+   names/points within a tile make the backend reject the board until the organizer fixes it.
 5. **`Teams` tab** — one row per player: `rsn`, `team`. This is the only place team membership
    lives. RSNs are matched case-insensitively with `_` treated as a space, so `Zezima` and
    `zez ima` behave as you'd expect. Use the exact same spelling and capitalization for every
-   member of a team; each distinct team name gets its own claim state for every item.
+   member of a team; each distinct team name gets its own claim state for every logical tile.
 6. **`Config` tab** — optionally set `event_start` / `event_end` (claims outside the window are
    rejected with `event_closed`) and leave `announce_from_backend` as `false` if your players
    run Dink.
 7. **`Leaderboard` tab** — read-only event view. It automatically shows claimed tiles, earned
-   points, remaining items, and remaining points for every distinct team in `Teams`. Make
+   points, remaining tiles, and remaining points for every distinct team in `Teams`. Make
    corrections in `Items`, `Teams`, or `Claims`; do not type over the leaderboard formulas.
 
-When updating an existing event sheet to a newer `Code.gs`, run `refreshLeaderboard` once
-from the Apps Script editor. It refreshes only the derived leaderboard formulas and formatting.
+When updating a sheet from the original one-item schema, run `upgradeGroupedTiles` once before
+deploying. It adds and backfills tile columns without deleting claims. Existing rows remain
+single-item tiles. The grouped API is a coordinated cutover: do this between events or during a
+maintenance window, then deploy the script and update every player to the grouped plugin build.
+Use `refreshLeaderboard` for later formula-only updates.
 
 Keep the editable spreadsheet organizer-only. The `Config` tab contains the participant token,
 organizer-only admin token, and optional backend webhook. Hiding the tab is cosmetic and does
@@ -61,8 +74,9 @@ Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
 
 ### During the event
 
-- `Claims` is the live board state. One row = one tile owned by one team.
-- `Leaderboard` is the organizer/spectator view. The same item can show claimed for one team
+- `Claims` is the live board state. One row = one logical tile owned by one team, including the
+  actual item that won it.
+- `Leaderboard` is the organizer/spectator view. The same tile can show claimed for one team
   and open for another; its summary and item matrix update automatically from `Claims`.
 - `Audit` logs claim and unclaim attempts including rejects, using an allowlist that excludes
   event tokens, admin tokens, and webhook URLs. This is where you look when someone says
@@ -70,7 +84,7 @@ Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
 - To reverse a claim:
   ```bash
   curl -sL -X POST "$URL" -H 'Content-Type: application/json' \
-    -d '{"action":"unclaim","admin_token":"'"$ADMIN_TOKEN"'","team":"Team One","item_id":21034}'
+    -d '{"action":"unclaim","admin_token":"'"$ADMIN_TOKEN"'","team":"Team One","tile_id":"raids-unique"}'
   ```
   The tile reopens and players see it on their next refresh (default 5 min, or the panel's
   Refresh button).

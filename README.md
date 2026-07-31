@@ -34,8 +34,8 @@ isn't detected, and a troubleshooting table. The summary below is the short vers
 Follow [`backend/README.md`](backend/README.md): create a Sheet, paste
 [`backend/Code.gs`](backend/Code.gs), run `setupSheet`, fill in the `Items` and `Teams` tabs,
 and deploy as a web app. Keep the `/exec` URL and the `token`. The generated `Leaderboard`
-tab shows each team's claimed count, earned points, remaining items, remaining points, and an
-item-by-team claim matrix; it is a derived view and never decides whether a claim succeeds.
+tab shows each team's claimed count, earned points, remaining tiles, remaining points, and a
+tile-by-team claim matrix; it is a derived view and never decides whether a claim succeeds.
 
 Keep the editable Sheet organizer-only. Players receive the `/exec` URL and event token, not
 Sheet access. The admin token and optional backend Discord webhook stay in the organizer-owned
@@ -49,8 +49,8 @@ this if showing RSNs and team results publicly is acceptable.
 
 Verify it with the `curl` smoke tests in that README **before** configuring the plugin — most
 setup problems are deployment permissions, and they're far easier to spot from a terminal.
-Existing pre-release sheets must follow the
-[security upgrade steps](backend/README.md#upgrading-an-existing-sheet) before reuse.
+Existing sheets must follow the
+[schema and security upgrade steps](backend/README.md#upgrading-an-existing-sheet) before reuse.
 
 ### 2. Each player
 
@@ -76,7 +76,7 @@ own team in config.
 | Show Verification Overlay | off | Keeps the current local date, time, time zone, and bingo code visible in the game view |
 | Bingo Verification Code | *(blank)* | Organizer-provided code displayed in the overlay; update it for each bingo |
 | Bingo Webhook Override | *(blank)* | Send claims to a specific Discord webhook instead of Dink's default |
-| Notification Message | see config | `%USERNAME%`, `%ITEM%`, `%TEAM%`, `%REMAINING%`, `%SOURCE%` |
+| Notification Message | see config | `%USERNAME%`, `%ITEM%`, `%TILE%`, `%TEAM%`, `%REMAINING%`, `%SOURCE%` |
 | Game Chat Confirmation | on | Prints the claim result in game so you know it registered |
 
 ### Screenshot verification overlay
@@ -97,7 +97,7 @@ filter anywhere in this plugin.**
 
 `LootReceived` is accepted for every record type except `PLAYER` (which is gated behind
 *Include PK Loot* and arrives via `PlayerLootReceived`). That overlaps with the NPC events,
-but upstream has moved individual bosses between these events over time, and the per-item
+but upstream has moved individual bosses between these events over time, and the per-tile
 dedupe below makes the overlap free. See [SETUP.md](SETUP.md) for the full coverage table,
 including the dependency on the Loot Tracker plugin for non-NPC loot.
 
@@ -141,9 +141,9 @@ use **End sessions** in RuneScape account settings.
 
 ### End-to-end checklist
 
-1. A board item drops → Discord post with screenshot, new row in `Claims`.
-2. The same item drops again for your team → no post, `Audit` shows `duplicate`.
-3. Two clients hit the same item at once → exactly one `Claims` row.
+1. An accepted board item drops → Discord post with screenshot, new row in `Claims`.
+2. Another alternative for that logical tile drops → no post, `Audit` shows `duplicate`.
+3. Two clients hit different alternatives for the same tile → exactly one `Claims` row.
 4. Interrupt a response after the Sheet commits → the same `claimId` replay returns the
    committed claim and the running client sends one Dink request.
 5. Admin unclaim → the tile reopens and can be claimed again after a refresh.
