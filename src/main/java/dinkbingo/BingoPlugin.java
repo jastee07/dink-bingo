@@ -90,6 +90,8 @@ public class BingoPlugin extends Plugin {
     private boolean refreshPending;
     private long inFlightLifecycle;
     private long inFlightRefresh;
+    private volatile BingoBoard currentBoard = BingoBoard.EMPTY;
+    private volatile boolean boardLoaded;
 
     @Provides
     BingoConfig provideConfig(ConfigManager configManager) {
@@ -107,6 +109,8 @@ public class BingoPlugin extends Plugin {
             inFlightLifecycle = 0;
             inFlightRefresh = 0;
         }
+        currentBoard = BingoBoard.EMPTY;
+        boardLoaded = false;
         detector.setClaimListener(this::onClaimResolved);
         overlayManager.add(verificationOverlay);
 
@@ -120,7 +124,11 @@ public class BingoPlugin extends Plugin {
         clientToolbar.addNavigation(navButton);
 
         panel.setRefreshHandler(this::refreshBoard);
-        panel.render(BingoBoard.EMPTY, bingoClient.isConfigured());
+        if (bingoClient.isConfigured()) {
+            panel.renderLoading();
+        } else {
+            renderBoard(BingoBoard.EMPTY, false);
+        }
 
         scheduleRefresh();
         refreshBoard();
@@ -180,8 +188,10 @@ public class BingoPlugin extends Plugin {
             return;
         }
         if (!bingoClient.isConfigured()) {
+            currentBoard = BingoBoard.EMPTY;
+            boardLoaded = false;
             detector.reset();
-            panel.render(BingoBoard.EMPTY, false);
+            renderBoard(BingoBoard.EMPTY, false);
             return;
         }
         if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null) {
@@ -222,8 +232,14 @@ public class BingoPlugin extends Plugin {
             && fetchRefresh == refreshGeneration.get()
             && error == null
             && board != null) {
+            currentBoard = board;
+            boardLoaded = true;
             detector.setBoard(board);
-            panel.render(board, true);
+            renderBoard(board, true);
+        } else if (isCurrent(lifecycle)
+            && fetchRefresh == refreshGeneration.get()
+            && !boardLoaded) {
+            panel.renderLoadError();
         }
         if (rerun && active) {
             refreshBoard();
@@ -241,7 +257,12 @@ public class BingoPlugin extends Plugin {
             refreshBoard();
         } else if (event.getGameState() == GameState.LOGIN_SCREEN) {
             refreshGeneration.incrementAndGet();
+            currentBoard = BingoBoard.EMPTY;
+            boardLoaded = false;
             detector.reset();
+            if (bingoClient.isConfigured()) {
+                panel.renderLoading();
+            }
         }
     }
 
@@ -254,9 +275,21 @@ public class BingoPlugin extends Plugin {
             scheduleRefresh();
         }
         if ("backendUrl".equals(event.getKey()) || "eventToken".equals(event.getKey())) {
+            currentBoard = BingoBoard.EMPTY;
+            boardLoaded = false;
             detector.reset();
+            if (bingoClient.isConfigured()) {
+                panel.renderLoading();
+            }
             refreshBoard();
+        } else if (("boardView".equals(event.getKey())
+            || "hideCompletedTiles".equals(event.getKey())) && boardLoaded) {
+            renderBoard(currentBoard, true);
         }
+    }
+
+    private void renderBoard(BingoBoard board, boolean configured) {
+        panel.render(board, configured, config.boardView(), config.hideCompletedTiles());
     }
 
     // ------------------------------------------------------------------
@@ -332,12 +365,22 @@ public class BingoPlugin extends Plugin {
 
     private String describe(ClaimResponse response) {
         String item = response.getItemName() != null ? response.getItemName() : "That item";
+        String tile = response.getTileName();
+        String claimLabel = tile != null && !tile.equalsIgnoreCase(item) ?
+            item + " for the " + tile + " tile" : item;
         switch (response.getStatus()) {
             case BingoResponses.CLAIMED:
-                return "Bingo: claimed " + item + " for " + response.getTeam()
+                return "Bingo: completed " + claimLabel + " for " + response.getTeam()
                     + " (" + response.getRemaining() + " tiles left).";
+            case BingoResponses.PROGRESS:
+                return "Bingo: added " + item + " to the " + (tile != null ? tile : item)
+                    + " tile for " + response.getTeam() + " (" + response.getProgress()
+                    + "/" + response.getRequired() + ").";
             case BingoResponses.DUPLICATE:
-                return "Bingo: " + item + " was already claimed by " + response.getClaimedBy() + ".";
+                return response.isComplete()
+                    ? "Bingo: the " + (tile != null ? tile : item) + " tile is already complete."
+                    : "Bingo: " + item + " is already credited to the "
+                        + (tile != null ? tile : item) + " tile.";
             case BingoResponses.NOT_ON_TEAM:
                 return "Bingo: your RSN is not on the Teams tab, so nothing was claimed.";
             case BingoResponses.EVENT_CLOSED:

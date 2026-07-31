@@ -78,19 +78,29 @@ class BingoClientTest {
     @Test
     void fetchesAndParsesTheBoard() throws Exception {
         server.enqueue(json("{\"status\":\"ok\",\"team\":\"Team One\",\"remaining\":1,\"total\":2," +
-            "\"eventOpen\":true,\"items\":[" +
-            "{\"id\":4151,\"name\":\"Abyssal whip\",\"points\":1,\"claimed\":false}," +
-            "{\"id\":21034,\"name\":\"Dexterous prayer scroll\",\"points\":2,\"claimed\":true,\"claimedBy\":\"Someone\"}]}"));
+            "\"eventOpen\":true,\"tiles\":[" +
+            "{\"id\":\"rare-drop\",\"name\":\"Any rare drop\",\"points\":1,\"required\":2,\"progress\":1,\"claimed\":false," +
+            "\"claimedItems\":[{\"id\":4151,\"name\":\"Abyssal whip\",\"claimedBy\":\"Jake\"}]," +
+            "\"options\":[{\"id\":4151,\"name\":\"Abyssal whip\"},{\"id\":11832,\"name\":\"Bandos chestplate\"}]}," +
+            "{\"id\":\"21034\",\"name\":\"Dexterous prayer scroll\",\"points\":2,\"required\":1,\"progress\":1,\"claimed\":true," +
+            "\"claimedBy\":\"Someone\",\"claimedItem\":{\"id\":21034,\"name\":\"Dexterous prayer scroll\"}," +
+            "\"claimedItems\":[{\"id\":21034,\"name\":\"Dexterous prayer scroll\",\"claimedBy\":\"Someone\"}]," +
+            "\"options\":[{\"id\":21034,\"name\":\"Dexterous prayer scroll\"}]}]}"));
 
         BingoBoard board = client.fetchBoard("Jake").get(5, TimeUnit.SECONDS);
 
         assertEquals("Team One", board.getTeam());
         assertTrue(board.isEventOpen());
-        assertEquals(2, board.getItems().size());
+        assertEquals(2, board.getTiles().size());
         assertEquals(1, board.getRemainingCount());
-        assertTrue(board.isClaimable(4151));
+        assertFalse(board.isClaimable(4151), "an already-credited option is not claimable");
+        assertTrue(board.isClaimable(11832), "an uncredited option can advance a partial tile");
         assertFalse(board.isClaimable(21034), "an already-claimed tile is not claimable");
-        assertEquals("Someone", board.getById().get(21034).getClaimedBy());
+        assertEquals(2, board.getByItemId().get(4151).getRequired());
+        assertEquals(1, board.getByItemId().get(4151).getProgress());
+        assertEquals("Jake", board.getByItemId().get(4151).getClaimedItems().get(0).getClaimedBy());
+        assertEquals("Someone", board.getByItemId().get(21034).getClaimedBy());
+        assertEquals("rare-drop", board.getByItemId().get(4151).getId());
 
         RecordedRequest request = server.takeRequest();
         assertEquals("POST", request.getMethod());
@@ -102,7 +112,7 @@ class BingoClientTest {
 
     @Test
     void preservesTheCurrentBoardWhenTheBackendRejectsTheToken() throws Exception {
-        server.enqueue(json("{\"status\":\"error\",\"error\":\"bad_token\",\"items\":[]}"));
+        server.enqueue(json("{\"status\":\"error\",\"error\":\"bad_token\",\"tiles\":[]}"));
 
         BingoBoard board = client.fetchBoard("Jake").get(5, TimeUnit.SECONDS);
 
@@ -111,13 +121,21 @@ class BingoClientTest {
 
     @Test
     void postsTheClaimWithTokenAndIdempotencyKey() throws Exception {
-        server.enqueue(json("{\"status\":\"claimed\",\"team\":\"Team One\",\"itemId\":4151," +
-            "\"itemName\":\"Abyssal whip\",\"remaining\":3,\"total\":4}"));
+        server.enqueue(json("{\"status\":\"claimed\",\"team\":\"Team One\",\"tileId\":\"rare-drop\"," +
+            "\"tileName\":\"Any rare drop\",\"itemId\":4151," +
+            "\"itemName\":\"Abyssal whip\",\"progress\":2,\"required\":2,\"complete\":true," +
+            "\"claimedItems\":[{\"id\":11832,\"name\":\"Bandos chestplate\"},{\"id\":4151,\"name\":\"Abyssal whip\"}]," +
+            "\"remaining\":3,\"total\":4}"));
 
         ClaimResponse response = client.submitClaim(claim()).get(5, TimeUnit.SECONDS);
 
         assertTrue(response.isClaimed());
         assertEquals("Team One", response.getTeam());
+        assertEquals("rare-drop", response.getTileId());
+        assertEquals(2, response.getProgress());
+        assertEquals(2, response.getRequired());
+        assertTrue(response.isComplete());
+        assertEquals(2, response.getClaimedItems().size());
         assertEquals(3, response.getRemaining());
 
         RecordedRequest request = server.takeRequest();
@@ -128,6 +146,22 @@ class BingoClientTest {
         assertEquals("claim-abc", body.get("claimId").getAsString());
         assertEquals("Jake", body.get("rsn").getAsString());
         assertFalse(body.has("accountHash"), "account hashes must not leave the client");
+    }
+
+    @Test
+    void parsesAProgressResponseAsAnAnnounceableResolvedOutcome() throws Exception {
+        server.enqueue(json("{\"status\":\"progress\",\"team\":\"Team One\",\"tileId\":\"rare-drop\"," +
+            "\"tileName\":\"Any rare drop\",\"itemId\":4151,\"itemName\":\"Abyssal whip\"," +
+            "\"progress\":1,\"required\":2,\"complete\":false,\"remaining\":4,\"total\":4}"));
+
+        ClaimResponse response = client.submitClaim(claim()).get(5, TimeUnit.SECONDS);
+
+        assertTrue(response.isProgress());
+        assertTrue(response.isAnnounceable());
+        assertTrue(response.isResolvedOutcome());
+        assertFalse(response.isComplete());
+        assertEquals(1, response.getProgress());
+        assertEquals(2, response.getRequired());
     }
 
     @Test
@@ -205,7 +239,7 @@ class BingoClientTest {
     @Test
     void returnsEmptyBoardWhenNotConfigured() throws Exception {
         when(config.backendUrl()).thenReturn("");
-        assertEquals(BingoBoard.EMPTY.getItems(), client.fetchBoard("Jake").get(5, TimeUnit.SECONDS).getItems());
+        assertEquals(BingoBoard.EMPTY.getTiles(), client.fetchBoard("Jake").get(5, TimeUnit.SECONDS).getTiles());
         assertEquals(0, server.getRequestCount());
     }
 

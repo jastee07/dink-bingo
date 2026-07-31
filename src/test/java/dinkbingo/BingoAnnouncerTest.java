@@ -35,6 +35,8 @@ class BingoAnnouncerTest {
     void setUp() {
         MockitoAnnotations.openMocks(this);
         when(config.notifyMessage()).thenReturn("%USERNAME% claimed %ITEM% for %TEAM% — %REMAINING% tiles left");
+        when(config.progressMessage()).thenReturn(
+            "%USERNAME% added %ITEM% to %TILE% for %TEAM% — %PROGRESS%/%REQUIRED%");
         when(config.sendScreenshot()).thenReturn(true);
         when(config.bingoWebhook()).thenReturn("");
 
@@ -51,7 +53,7 @@ class BingoAnnouncerTest {
 
         Map<String, Object> data = message.getData();
         assertEquals("Dink Bingo", data.get("sourcePlugin"));
-        assertEquals("Bingo tile claimed", data.get("title"));
+        assertEquals("Bingo tile completed", data.get("title"));
         assertEquals(true, data.get("imageRequested"));
         assertEquals("https://static.runelite.net/cache/item/icon/4151.png", data.get("thumbnail"));
         assertTrue(String.valueOf(data.get("text")).contains("%ITEM%"));
@@ -67,9 +69,51 @@ class BingoAnnouncerTest {
 
         assertEquals("Abyssal whip", replacements.get("%ITEM%").get("value"));
         assertTrue(replacements.get("%ITEM%").get("richValue").contains("oldschool.runescape.wiki"));
+        assertEquals("Any rare drop", replacements.get("%TILE%").get("value"));
         assertEquals("Team One", replacements.get("%TEAM%").get("value"));
+        assertEquals("2", replacements.get("%PROGRESS%").get("value"));
+        assertEquals("2", replacements.get("%REQUIRED%").get("value"));
         assertEquals("3", replacements.get("%REMAINING%").get("value"));
         assertEquals("Abyssal demon", replacements.get("%SOURCE%").get("value"));
+    }
+
+    @Test
+    void includesTheLogicalTileAndWinningItemAsEvidence() {
+        announcer.announce(claim(BingoResponses.CLAIMED), "Abyssal demon");
+
+        Map<String, Object> data = capture().getData();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> fields = (List<Map<String, Object>>) data.get("fields");
+        assertTrue(fields.stream().anyMatch(field ->
+            "Bingo Tile".equals(field.get("name")) && "Any rare drop".equals(field.get("value"))));
+        assertTrue(fields.stream().anyMatch(field ->
+            "Completing Item".equals(field.get("name")) && "Abyssal whip".equals(field.get("value"))));
+        assertTrue(fields.stream().anyMatch(field ->
+            "Progress".equals(field.get("name")) && "2 / 2".equals(field.get("value"))));
+        assertTrue(fields.stream().anyMatch(field ->
+            "Credited Items".equals(field.get("name"))
+                && "Bandos chestplate, Abyssal whip".equals(field.get("value"))));
+    }
+
+    @Test
+    void postsADinkNotifyMessageForAcceptedProgress() {
+        ClaimResponse response = claim(BingoResponses.PROGRESS);
+        response.setProgress(1);
+        response.setComplete(false);
+        response.setPoints(0);
+
+        announcer.announce(response, "Abyssal demon");
+
+        Map<String, Object> data = capture().getData();
+        assertEquals("Bingo tile progress", data.get("title"));
+        assertEquals(config.progressMessage(), data.get("text"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> metadata = (Map<String, Object>) data.get("metadata");
+        assertEquals(0, metadata.get("points"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> fields = (List<Map<String, Object>>) data.get("fields");
+        assertTrue(fields.stream().anyMatch(field ->
+            "Contributed Item".equals(field.get("name")) && "Abyssal whip".equals(field.get("value"))));
     }
 
     /** Dink drops the entire request unless every url is an okhttp3.HttpUrl instance. */
@@ -139,11 +183,23 @@ class BingoAnnouncerTest {
         ClaimResponse response = new ClaimResponse();
         response.setStatus(status);
         response.setTeam("Team One");
+        response.setTileId("rare-drop");
+        response.setTileName("Any rare drop");
         response.setItemId(4151);
         response.setItemName("Abyssal whip");
         response.setPoints(1);
+        response.setProgress(2);
+        response.setRequired(2);
+        response.setComplete(true);
         response.setRemaining(3);
         response.setTotal(10);
+        BingoResponses.BoardClaimedItem first = new BingoResponses.BoardClaimedItem();
+        first.setId(11832);
+        first.setName("Bandos chestplate");
+        BingoResponses.BoardClaimedItem second = new BingoResponses.BoardClaimedItem();
+        second.setId(4151);
+        second.setName("Abyssal whip");
+        response.setClaimedItems(java.util.Arrays.asList(first, second));
         return response;
     }
 }

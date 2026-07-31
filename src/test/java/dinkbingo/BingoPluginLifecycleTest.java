@@ -78,6 +78,7 @@ class BingoPluginLifecycleTest {
         inject("verificationOverlay", verificationOverlay);
 
         when(config.refreshMinutes()).thenReturn(5);
+        when(config.boardView()).thenReturn(BoardView.NAMED_TILES);
         when(bingoClient.isConfigured()).thenReturn(true);
         when(client.getGameState()).thenReturn(GameState.LOGGED_IN);
         when(client.getLocalPlayer()).thenReturn(player);
@@ -101,7 +102,7 @@ class BingoPluginLifecycleTest {
         pending.complete(board);
 
         verify(detector, never()).setBoard(any());
-        verify(panel, never()).render(board, true);
+        verify(panel, never()).render(board, true, BoardView.NAMED_TILES, false);
     }
 
     @Test
@@ -122,8 +123,35 @@ class BingoPluginLifecycleTest {
 
         verify(detector, never()).setBoard(stale);
         verify(detector).setBoard(current);
-        verify(panel, never()).render(stale, true);
-        verify(panel).render(current, true);
+        verify(panel, never()).render(stale, true, BoardView.NAMED_TILES, false);
+        verify(panel).render(current, true, BoardView.NAMED_TILES, false);
+    }
+
+    @Test
+    void configuredStartupShowsLoadingUntilTheInitialBoardArrives() throws Exception {
+        CompletableFuture<BingoBoard> pending = new CompletableFuture<>();
+        when(bingoClient.fetchBoard("Jake")).thenReturn(pending);
+        BingoBoard board = board("Current Team");
+
+        plugin.startUp();
+
+        verify(panel).renderLoading();
+        verify(panel, never()).render(BingoBoard.EMPTY, true, BoardView.NAMED_TILES, false);
+
+        pending.complete(board);
+
+        verify(panel).render(board, true, BoardView.NAMED_TILES, false);
+    }
+
+    @Test
+    void initialBoardFailureReplacesLoadingWithAnError() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(null));
+
+        plugin.startUp();
+
+        verify(panel).renderLoading();
+        verify(panel).renderLoadError();
     }
 
     private void inject(String name, Object value) throws Exception {
@@ -134,6 +162,10 @@ class BingoPluginLifecycleTest {
 
     private static BingoBoard board(String team) {
         return new BingoBoard(team, Collections.singletonList(
-            new BingoItem(4151, "Abyssal whip", 1, false, null, null)), true);
+            new BingoTile("4151", "Abyssal whip", 1,
+                1, 0,
+                Collections.singletonList(new BingoItem(4151, "Abyssal whip")),
+                Collections.emptyList(),
+                false, null, null, null)), true);
     }
 }

@@ -11,7 +11,6 @@ import javax.inject.Inject;
 import javax.inject.Singleton;
 import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
-import javax.swing.ImageIcon;
 import javax.swing.JButton;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
@@ -23,6 +22,9 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.StringJoiner;
 
 /**
  * Side panel showing the team's board: which tiles are still open, and who took the rest.
@@ -94,31 +96,56 @@ public class BingoPanel extends PluginPanel {
     }
 
     /** Safe to call from any thread. */
-    public void render(BingoBoard board, boolean configured) {
-        SwingUtilities.invokeLater(() -> renderOnEdt(board, configured));
+    public void render(
+        BingoBoard board,
+        boolean configured,
+        BoardView boardView,
+        boolean hideCompletedTiles
+    ) {
+        SwingUtilities.invokeLater(() ->
+            renderOnEdt(board, configured, boardView, hideCompletedTiles));
     }
 
-    private void renderOnEdt(BingoBoard board, boolean configured) {
+    /** Safe to call from any thread. */
+    public void renderLoading() {
+        SwingUtilities.invokeLater(() -> renderMessage(
+            "Loading board",
+            "Fetching your team's tiles\u2026"
+        ));
+    }
+
+    /** Safe to call from any thread. */
+    public void renderLoadError() {
+        SwingUtilities.invokeLater(() -> renderMessage(
+            "Couldn't load board",
+            "Check your connection, then press Refresh"
+        ));
+    }
+
+    private void renderOnEdt(
+        BingoBoard board,
+        boolean configured,
+        BoardView boardView,
+        boolean hideCompletedTiles
+    ) {
         SwingUtil.fastRemoveAll(itemsPanel);
 
         if (!configured) {
             headerLabel.setText("Not configured");
             statusLabel.setText("Set a Backend URL in the config");
-            itemsPanel.revalidate();
-            itemsPanel.repaint();
+            refreshItemsPanel();
             return;
         }
 
         if (!board.isConfigured()) {
             headerLabel.setText("No team");
             statusLabel.setText("Your RSN is not on the Teams tab");
-            itemsPanel.revalidate();
-            itemsPanel.repaint();
+            refreshItemsPanel();
             return;
         }
 
         headerLabel.setText(board.getTeam());
-        statusLabel.setText(board.getRemainingCount() + " of " + board.getItems().size() + " tiles left"
+        statusLabel.setText(board.getRemainingCount() + " of " + board.getTiles().size() + " tiles left"
             + (board.isEventOpen() ? "" : " (event closed)"));
 
         GridBagConstraints c = new GridBagConstraints();
@@ -127,47 +154,140 @@ public class BingoPanel extends PluginPanel {
         c.gridy = 0;
         c.weightx = 1;
 
-        for (BingoItem item : board.getItems()) {
-            itemsPanel.add(buildRow(item), c);
-            c.gridy++;
+        if (boardView == BoardView.POSSIBLE_ITEMS) {
+            for (BingoTile tile : board.getTiles()) {
+                if (tile.isClaimed()) {
+                    continue;
+                }
+                Set<Integer> creditedIds = creditedIds(tile);
+                for (BingoItem option : tile.getOptions()) {
+                    if (!creditedIds.contains(option.getId())) {
+                        itemsPanel.add(buildItemRow(tile, option), c);
+                        c.gridy++;
+                    }
+                }
+            }
+        } else {
+            for (BingoTile tile : board.getTiles()) {
+                if (hideCompletedTiles && tile.isClaimed()) {
+                    continue;
+                }
+                itemsPanel.add(buildTileRow(tile), c);
+                c.gridy++;
+            }
         }
 
+        refreshItemsPanel();
+    }
+
+    private void renderMessage(String header, String status) {
+        SwingUtil.fastRemoveAll(itemsPanel);
+        headerLabel.setText(header);
+        statusLabel.setText(status);
+        refreshItemsPanel();
+    }
+
+    private void refreshItemsPanel() {
         itemsPanel.revalidate();
         itemsPanel.repaint();
     }
 
-    private JPanel buildRow(BingoItem item) {
+    private JPanel buildTileRow(BingoTile tile) {
         JPanel row = new JPanel(new BorderLayout(6, 0));
         row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
         row.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
 
         JLabel icon = new JLabel();
         icon.setPreferredSize(new Dimension(36, 32));
-        AsyncBufferedImage image = itemManager.getImage(item.getId());
-        image.addTo(icon);
+        Set<Integer> creditedIds = creditedIds(tile);
+        BingoItem iconItem = tile.getClaimedItem();
+        if (iconItem == null) {
+            for (BingoItem option : tile.getOptions()) {
+                if (!creditedIds.contains(option.getId())) {
+                    iconItem = option;
+                    break;
+                }
+            }
+        }
+        if (iconItem != null) {
+            AsyncBufferedImage image = itemManager.getImage(iconItem.getId());
+            image.addTo(icon);
+        }
         row.add(icon, BorderLayout.WEST);
 
         JLabel name = new JLabel();
         name.setFont(FontManager.getRunescapeSmallFont());
-        if (item.isClaimed()) {
+        if (tile.isClaimed()) {
+            String winner = tile.getClaimedItem() != null ? tile.getClaimedItem().getName() : null;
             // Strikethrough via HTML is the only way to get it on a plain JLabel.
-            name.setText("<html><s>" + escape(item.getName()) + "</s></html>");
+            name.setText("<html><s>" + escape(tile.getName()) + "</s></html>");
             name.setForeground(CLAIMED_COLOR);
-            name.setToolTipText("Claimed by " + item.getClaimedBy());
+            name.setToolTipText("Claimed by " + tile.getClaimedBy() +
+                (winner == null ? "" : " with " + winner));
         } else {
-            name.setText(escape(item.getName()));
+            name.setText(tile.getName());
             name.setForeground(OPEN_COLOR);
+            StringJoiner credited = new StringJoiner(", ");
+            for (BingoContribution contribution : tile.getClaimedItems()) {
+                credited.add(contribution.getName());
+            }
+            StringJoiner missing = new StringJoiner(", ");
+            for (BingoItem option : tile.getOptions()) {
+                if (!creditedIds.contains(option.getId())) missing.add(option.getName());
+            }
+            name.setToolTipText((tile.getClaimedItems().isEmpty() ? "" :
+                "Credited: " + credited + ". ") + "Still eligible: " + missing);
         }
         row.add(name, BorderLayout.CENTER);
 
-        if (item.isClaimed() && item.getClaimedBy() != null) {
-            JLabel by = new JLabel(item.getClaimedBy());
+        if (tile.isClaimed() && tile.getClaimedBy() != null) {
+            JLabel by = new JLabel(tile.getClaimedBy());
             by.setFont(FontManager.getRunescapeSmallFont());
             by.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
             row.add(by, BorderLayout.EAST);
+        } else if (tile.getRequired() > 1 || tile.getProgress() > 0) {
+            JLabel progress = new JLabel(tile.getProgress() + "/" + tile.getRequired());
+            progress.setFont(FontManager.getRunescapeSmallFont());
+            progress.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
+            row.add(progress, BorderLayout.EAST);
         }
 
         return row;
+    }
+
+    private JPanel buildItemRow(BingoTile tile, BingoItem option) {
+        JPanel row = new JPanel(new BorderLayout(6, 0));
+        row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+        row.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+
+        JLabel icon = new JLabel();
+        icon.setPreferredSize(new Dimension(36, 32));
+        itemManager.getImage(option.getId()).addTo(icon);
+        row.add(icon, BorderLayout.WEST);
+
+        JLabel name = new JLabel(option.getName());
+        name.setFont(FontManager.getRunescapeSmallFont());
+        name.setForeground(OPEN_COLOR);
+        name.setToolTipText("Eligible for " + tile.getName());
+        row.add(name, BorderLayout.CENTER);
+
+        if (tile.getRequired() > 1 || tile.getProgress() > 0) {
+            JLabel progress = new JLabel(tile.getProgress() + "/" + tile.getRequired());
+            progress.setFont(FontManager.getRunescapeSmallFont());
+            progress.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
+            progress.setToolTipText(tile.getName());
+            row.add(progress, BorderLayout.EAST);
+        }
+
+        return row;
+    }
+
+    private static Set<Integer> creditedIds(BingoTile tile) {
+        Set<Integer> creditedIds = new HashSet<>();
+        for (BingoContribution contribution : tile.getClaimedItems()) {
+            creditedIds.add(contribution.getId());
+        }
+        return creditedIds;
     }
 
     private static String escape(String text) {

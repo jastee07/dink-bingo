@@ -14,21 +14,45 @@ config. Total player-side effort is about a minute.
 3. Run `setupSheet` once from the editor and approve the permission prompt. It creates the
    `Items`, `Teams`, `Claims`, `Audit`, `Config`, and `Leaderboard` tabs and generates a
    `token` and `admin_token`.
-4. **`Items` tab** — one row per tile. `item_id` is the canonical OSRS item id; get it from
-   the wiki URL or `https://prices.runescape.wiki/api/v1/osrs/mapping`.
+4. **`Items` tab** — one row per accepted item, with columns
+   `tile_id`, `tile_name`, `item_id`, `item_name`, `points`, `required_count`, `notes`.
+   `item_id` is the canonical OSRS item id; get it from the wiki URL or
+   `https://prices.runescape.wiki/api/v1/osrs/mapping`. Repeat the same `required_count` on
+   every row in a tile. Use `1` for a normal or “one of” tile, `2` for a 2-of-N tile, and so
+   on. For example, this is a 2-of-3 Abyssal dye tile:
+
+   | tile_id | tile_name | item_id | item_name | points | required_count | notes |
+   | --- | --- | ---: | --- | ---: | ---: | --- |
+   | 26807 | Abyssal dye | 26807 | Abyssal green dye | 3 | 2 | Any two colors |
+   | 26807 | Abyssal dye | 26809 | Abyssal blue dye | 3 | 2 | Any two colors |
+   | 26807 | Abyssal dye | 26811 | Abyssal red dye | 3 | 2 | Any two colors |
+
+   A 3-of-5 tile uses the same pattern: create five rows with one shared tile ID and put `3`
+   in `required_count` on all five rows.
+
+   An item id may appear only once in the tab. Repeated item ids, blank fields, or inconsistent
+   names, points, or required counts within a tile make the backend reject the board until the
+   organizer fixes it. `required_count` must be a whole number from 1 through the number of
+   distinct options. Quantities do not count: one drop of two blue dyes is still one distinct
+   option.
 5. **`Teams` tab** — one row per player: `rsn`, `team`. This is the only place team membership
    lives. RSNs are matched case-insensitively with `_` treated as a space, so `Zezima` and
    `zez ima` behave as you'd expect. Use the exact same spelling and capitalization for every
-   member of a team; each distinct team name gets its own claim state for every item.
+   member of a team; each distinct team name gets its own claim state for every logical tile.
 6. **`Config` tab** — optionally set `event_start` / `event_end` (claims outside the window are
    rejected with `event_closed`) and leave `announce_from_backend` as `false` if your players
    run Dink.
-7. **`Leaderboard` tab** — read-only event view. It automatically shows claimed tiles, earned
-   points, remaining items, and remaining points for every distinct team in `Teams`. Make
-   corrections in `Items`, `Teams`, or `Claims`; do not type over the leaderboard formulas.
+7. **`Leaderboard` tab** — read-only event view. It shows K-of-N progress, completed tiles,
+   earned points, remaining tiles, and remaining points for every team. Points are awarded only
+   when progress reaches `required_count`. Make corrections in `Items`, `Teams`, or `Claims`;
+   do not type over the leaderboard formulas.
 
-When updating an existing event sheet to a newer `Code.gs`, run `refreshLeaderboard` once
-from the Apps Script editor. It refreshes only the derived leaderboard formulas and formatting.
+When updating a sheet from the original one-item schema, run `upgradeGroupedTiles` once before
+deploying. It adds and backfills tile and threshold columns without deleting claims. Existing
+rows become 1-of-1 tiles and existing claim rows become completed contributions. The threshold
+API is a coordinated cutover: do this between events or during a maintenance window, then deploy
+the script and update every player to the threshold-capable plugin build.
+Use `refreshLeaderboard` for later formula-only updates.
 
 Keep the editable spreadsheet organizer-only. The `Config` tab contains the participant token,
 organizer-only admin token, and optional backend webhook. Hiding the tab is cosmetic and does
@@ -61,19 +85,28 @@ Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
 
 ### During the event
 
-- `Claims` is the live board state. One row = one tile owned by one team.
-- `Leaderboard` is the organizer/spectator view. The same item can show claimed for one team
-  and open for another; its summary and item matrix update automatically from `Claims`.
+- `Claims` is the live board state. One row = one accepted distinct item contribution. A 3-of-5
+  tile can therefore have up to three active rows for one team; quantities never create extra
+  progress.
+- `Leaderboard` is the organizer/spectator view. The same tile can show claimed for one team
+  and partial or open for another; its summary and progress matrix update automatically from
+  `Claims`.
 - `Audit` logs claim and unclaim attempts including rejects, using an allowlist that excludes
   event tokens, admin tokens, and webhook URLs. This is where you look when someone says
   "it didn't count".
-- To reverse a claim:
+- To remove one credited item and reduce progress:
   ```bash
   curl -sL -X POST "$URL" -H 'Content-Type: application/json' \
-    -d '{"action":"unclaim","admin_token":"'"$ADMIN_TOKEN"'","team":"Team One","item_id":21034}'
+    -d '{"action":"unclaim","admin_token":"'"$ADMIN_TOKEN"'","team":"Team One","tile_id":"26807","item_id":26809}'
   ```
-  The tile reopens and players see it on their next refresh (default 5 min, or the panel's
-  Refresh button).
+- To remove every contribution for a team/tile:
+  ```bash
+  curl -sL -X POST "$URL" -H 'Content-Type: application/json' \
+    -d '{"action":"unclaim","admin_token":"'"$ADMIN_TOKEN"'","team":"Team One","tile_id":"26807"}'
+  ```
+  Players see the corrected progress on their next refresh (default 5 min, or the panel's
+  Refresh button). Removing one item from a completed tile also removes its points until the
+  threshold is reached again.
 
 ---
 
@@ -87,7 +120,9 @@ Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
    more than it looks.
 5. Open the bingo icon in the sidebar. If you see your team name and the tile list, you're done.
    Long tile lists scroll below the fixed team summary and Refresh button. "Not on a team"
-   means your RSN isn't on the organizer's `Teams` tab.
+   means your RSN isn't on the organizer's `Teams` tab. Set **Board View** to **Possible Items**
+   to expand unfinished tiles into every item option your team can still contribute, or enable
+   **Hide Completed Tiles** to trim completed rows from the default **Named Tiles** view.
 
 Nothing else is needed. You don't pick your team, you don't enter item ids, and you don't have
 to remember to do anything when a drop lands.
@@ -158,9 +193,9 @@ Grimy guam, say), kill something that drops it, and watch the tile close.
 | Panel says "Not configured" | Backend URL is blank. No network calls are made until it's set. |
 | Panel says "Not on a team" | RSN missing from the `Teams` tab. |
 | Nothing happens on a drop, no chat line | Backend unreachable, or the item id on the board doesn't match the real drop. Check `Audit`. |
-| Chat says claimed, nothing in Discord | Dink's *Enable External Plugin Notifications* is off, or no webhook is set. |
+| Chat says progress/claimed, nothing in Discord | Dink's *Enable External Plugin Notifications* is off, or no webhook is set. |
 | Every claim fails silently | Deployment is not *Who has access: Anyone*. The client log names this explicitly. |
-| Tile claimed by the wrong team | Use the admin unclaim above, then fix the `Teams` tab. |
+| Contribution credited to the wrong team | Use item-level or whole-tile admin unclaim above, then fix the `Teams` tab. |
 
 ### Screenshot verification overlay
 

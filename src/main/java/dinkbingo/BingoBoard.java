@@ -3,6 +3,7 @@ package dinkbingo;
 import lombok.Getter;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -25,30 +26,53 @@ public final class BingoBoard {
     @Nullable
     private final String team;
 
-    private final List<BingoItem> items;
+    private final List<BingoTile> tiles;
 
     private final boolean eventOpen;
 
-    private final Map<Integer, BingoItem> byId;
+    private final Map<Integer, BingoTile> byItemId;
 
-    /** Ids of tiles this team has not claimed yet — the set detection matches against. */
-    private final Set<Integer> remaining;
+    private final Map<String, BingoTile> byTileId;
 
-    public BingoBoard(@Nullable String team, List<BingoItem> items, boolean eventOpen) {
+    /** Logical tile ids this team has not claimed yet. */
+    private final Set<String> remaining;
+
+    /** Accepted item ids not yet credited for their logical tile. */
+    private final Set<Integer> openItemIds;
+
+    public BingoBoard(@Nullable String team, List<BingoTile> tiles, boolean eventOpen) {
         this.team = team;
-        this.items = Collections.unmodifiableList(items);
+        this.tiles = Collections.unmodifiableList(new ArrayList<>(tiles));
         this.eventOpen = eventOpen;
 
-        Map<Integer, BingoItem> byId = new LinkedHashMap<>(items.size());
-        Set<Integer> remaining = new LinkedHashSet<>();
-        for (BingoItem item : items) {
-            byId.put(item.getId(), item);
-            if (!item.isClaimed()) {
-                remaining.add(item.getId());
+        Map<Integer, BingoTile> byItemId = new LinkedHashMap<>();
+        Map<String, BingoTile> byTileId = new LinkedHashMap<>();
+        Set<String> remaining = new LinkedHashSet<>();
+        Set<Integer> openItemIds = new LinkedHashSet<>();
+        for (BingoTile tile : tiles) {
+            if (byTileId.put(tile.getId(), tile) != null) {
+                throw new IllegalArgumentException("Duplicate tile id: " + tile.getId());
+            }
+            Set<Integer> credited = new LinkedHashSet<>();
+            for (BingoContribution contribution : tile.getClaimedItems()) {
+                credited.add(contribution.getId());
+            }
+            for (BingoItem option : tile.getOptions()) {
+                if (byItemId.put(option.getId(), tile) != null) {
+                    throw new IllegalArgumentException("Item belongs to multiple tiles: " + option.getId());
+                }
+                if (!tile.isClaimed() && !credited.contains(option.getId())) {
+                    openItemIds.add(option.getId());
+                }
+            }
+            if (!tile.isClaimed()) {
+                remaining.add(tile.getId());
             }
         }
-        this.byId = Collections.unmodifiableMap(byId);
+        this.byItemId = Collections.unmodifiableMap(byItemId);
+        this.byTileId = Collections.unmodifiableMap(byTileId);
         this.remaining = Collections.unmodifiableSet(remaining);
+        this.openItemIds = Collections.unmodifiableSet(openItemIds);
     }
 
     /**
@@ -58,11 +82,26 @@ public final class BingoBoard {
      * reject it anyway, and resubmitting is how the audit log fills with noise.
      */
     public boolean isClaimable(int itemId) {
-        return eventOpen && team != null && remaining.contains(itemId);
+        BingoTile tile = byItemId.get(itemId);
+        return eventOpen && team != null && tile != null && openItemIds.contains(itemId);
     }
 
     public int getRemainingCount() {
         return remaining.size();
+    }
+
+    @Nullable
+    public BingoItem findOption(int itemId) {
+        BingoTile tile = byItemId.get(itemId);
+        if (tile == null) {
+            return null;
+        }
+        for (BingoItem option : tile.getOptions()) {
+            if (option.getId() == itemId) {
+                return option;
+            }
+        }
+        return null;
     }
 
     /** Whether the backend recognised our RSN and gave us a team. */

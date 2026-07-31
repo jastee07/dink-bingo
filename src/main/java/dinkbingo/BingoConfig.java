@@ -19,16 +19,23 @@ public interface BingoConfig extends Config {
     String connectionSection = "Connection";
 
     @ConfigSection(
+        name = "Board Panel",
+        description = "How your team's board is displayed",
+        position = 10
+    )
+    String boardSection = "Board Panel";
+
+    @ConfigSection(
         name = "Detection",
         description = "What counts as a bingo drop",
-        position = 10
+        position = 20
     )
     String detectionSection = "Detection";
 
     @ConfigSection(
         name = "Announcements",
-        description = "How claims are announced via Dink",
-        position = 20
+        description = "How accepted progress and completions are announced via Dink",
+        position = 30
     )
     String announceSection = "Announcements";
 
@@ -70,6 +77,32 @@ public interface BingoConfig extends Config {
     )
     default int refreshMinutes() {
         return 5;
+    }
+
+    // -----------------------------------------------------------------------
+    // Board panel
+    // -----------------------------------------------------------------------
+
+    @ConfigItem(
+        keyName = "boardView",
+        name = "Board View",
+        description = "Show unfinished tile names or every item still eligible for an unfinished tile",
+        position = 11,
+        section = boardSection
+    )
+    default BoardView boardView() {
+        return BoardView.NAMED_TILES;
+    }
+
+    @ConfigItem(
+        keyName = "hideCompletedTiles",
+        name = "Hide Completed Tiles",
+        description = "Hide tiles your team has already completed from the sidebar",
+        position = 12,
+        section = boardSection
+    )
+    default boolean hideCompletedTiles() {
+        return false;
     }
 
     // -----------------------------------------------------------------------
@@ -142,7 +175,7 @@ public interface BingoConfig extends Config {
     @ConfigItem(
         keyName = "bingoWebhook",
         name = "Bingo Webhook Override",
-        description = "If non-empty, claims are sent to this Discord webhook.<br/>" +
+        description = "If non-empty, bingo updates are sent to this Discord webhook.<br/>" +
             "Otherwise Dink's 'External Webhook Override' (or primary URL) is used",
         position = 24,
         section = announceSection,
@@ -154,8 +187,10 @@ public interface BingoConfig extends Config {
 
     @ConfigItem(
         keyName = "notifyMessage",
-        name = "Notification Message",
-        description = "%USERNAME%, %ITEM%, %TEAM%, %REMAINING% and %SOURCE% are replaced",
+        name = "Completion Message",
+        description = "Used when a contribution completes a tile.<br/>" +
+            "%USERNAME%, %ITEM%, %TILE%, %TEAM%, %PROGRESS%, %REQUIRED%, " +
+            "%REMAINING% and %SOURCE% are replaced",
         position = 25,
         section = announceSection
     )
@@ -164,10 +199,23 @@ public interface BingoConfig extends Config {
     }
 
     @ConfigItem(
+        keyName = "progressMessage",
+        name = "Progress Message",
+        description = "Used when a distinct item advances a threshold tile without completing it.<br/>" +
+            "%USERNAME%, %ITEM%, %TILE%, %TEAM%, %PROGRESS%, %REQUIRED%, " +
+            "%REMAINING% and %SOURCE% are replaced",
+        position = 26,
+        section = announceSection
+    )
+    default String progressMessage() {
+        return "%USERNAME% added %ITEM% to %TILE% for %TEAM% — %PROGRESS%/%REQUIRED%";
+    }
+
+    @ConfigItem(
         keyName = "chatMessageOnClaim",
         name = "Game Chat Confirmation",
         description = "Print the claim result to your game chat so you know it registered",
-        position = 26,
+        position = 27,
         section = announceSection
     )
     default boolean chatMessageOnClaim() {
