@@ -73,6 +73,8 @@ tile lists scroll underneath them.
 | Backend URL | *(blank)* | The HTTPS Apps Script `/exec` URL. **No requests are made until this is set.** |
 | Event Token | *(blank)* | The `token` from the sheet's `Config` tab |
 | Refresh Interval | 5 min | How often the board is re-fetched so teammates' claims appear |
+| Board View | Named Tiles | Swap between logical tile names and every possible item still eligible for unfinished tiles |
+| Hide Completed Tiles | off | Hide tiles already completed by your team in the Named Tiles view |
 | Include Collection Log | on | Also claim from `New item added to your collection log` |
 | Include PK Loot | off | Whether items taken from other players can claim a tile |
 | Send Screenshot | on | Asks Dink to attach proof; Dink's own *Send Image* policy can still override |

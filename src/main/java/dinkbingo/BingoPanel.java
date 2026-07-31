@@ -96,26 +96,51 @@ public class BingoPanel extends PluginPanel {
     }
 
     /** Safe to call from any thread. */
-    public void render(BingoBoard board, boolean configured) {
-        SwingUtilities.invokeLater(() -> renderOnEdt(board, configured));
+    public void render(
+        BingoBoard board,
+        boolean configured,
+        BoardView boardView,
+        boolean hideCompletedTiles
+    ) {
+        SwingUtilities.invokeLater(() ->
+            renderOnEdt(board, configured, boardView, hideCompletedTiles));
     }
 
-    private void renderOnEdt(BingoBoard board, boolean configured) {
+    /** Safe to call from any thread. */
+    public void renderLoading() {
+        SwingUtilities.invokeLater(() -> renderMessage(
+            "Loading board",
+            "Fetching your team's tiles\u2026"
+        ));
+    }
+
+    /** Safe to call from any thread. */
+    public void renderLoadError() {
+        SwingUtilities.invokeLater(() -> renderMessage(
+            "Couldn't load board",
+            "Check your connection, then press Refresh"
+        ));
+    }
+
+    private void renderOnEdt(
+        BingoBoard board,
+        boolean configured,
+        BoardView boardView,
+        boolean hideCompletedTiles
+    ) {
         SwingUtil.fastRemoveAll(itemsPanel);
 
         if (!configured) {
             headerLabel.setText("Not configured");
             statusLabel.setText("Set a Backend URL in the config");
-            itemsPanel.revalidate();
-            itemsPanel.repaint();
+            refreshItemsPanel();
             return;
         }
 
         if (!board.isConfigured()) {
             headerLabel.setText("No team");
             statusLabel.setText("Your RSN is not on the Teams tab");
-            itemsPanel.revalidate();
-            itemsPanel.repaint();
+            refreshItemsPanel();
             return;
         }
 
@@ -129,26 +154,52 @@ public class BingoPanel extends PluginPanel {
         c.gridy = 0;
         c.weightx = 1;
 
-        for (BingoTile tile : board.getTiles()) {
-            itemsPanel.add(buildRow(tile), c);
-            c.gridy++;
+        if (boardView == BoardView.POSSIBLE_ITEMS) {
+            for (BingoTile tile : board.getTiles()) {
+                if (tile.isClaimed()) {
+                    continue;
+                }
+                Set<Integer> creditedIds = creditedIds(tile);
+                for (BingoItem option : tile.getOptions()) {
+                    if (!creditedIds.contains(option.getId())) {
+                        itemsPanel.add(buildItemRow(tile, option), c);
+                        c.gridy++;
+                    }
+                }
+            }
+        } else {
+            for (BingoTile tile : board.getTiles()) {
+                if (hideCompletedTiles && tile.isClaimed()) {
+                    continue;
+                }
+                itemsPanel.add(buildTileRow(tile), c);
+                c.gridy++;
+            }
         }
 
+        refreshItemsPanel();
+    }
+
+    private void renderMessage(String header, String status) {
+        SwingUtil.fastRemoveAll(itemsPanel);
+        headerLabel.setText(header);
+        statusLabel.setText(status);
+        refreshItemsPanel();
+    }
+
+    private void refreshItemsPanel() {
         itemsPanel.revalidate();
         itemsPanel.repaint();
     }
 
-    private JPanel buildRow(BingoTile tile) {
+    private JPanel buildTileRow(BingoTile tile) {
         JPanel row = new JPanel(new BorderLayout(6, 0));
         row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
         row.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
 
         JLabel icon = new JLabel();
         icon.setPreferredSize(new Dimension(36, 32));
-        Set<Integer> creditedIds = new HashSet<>();
-        for (BingoContribution contribution : tile.getClaimedItems()) {
-            creditedIds.add(contribution.getId());
-        }
+        Set<Integer> creditedIds = creditedIds(tile);
         BingoItem iconItem = tile.getClaimedItem();
         if (iconItem == null) {
             for (BingoItem option : tile.getOptions()) {
@@ -202,6 +253,41 @@ public class BingoPanel extends PluginPanel {
         }
 
         return row;
+    }
+
+    private JPanel buildItemRow(BingoTile tile, BingoItem option) {
+        JPanel row = new JPanel(new BorderLayout(6, 0));
+        row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+        row.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+
+        JLabel icon = new JLabel();
+        icon.setPreferredSize(new Dimension(36, 32));
+        itemManager.getImage(option.getId()).addTo(icon);
+        row.add(icon, BorderLayout.WEST);
+
+        JLabel name = new JLabel(option.getName());
+        name.setFont(FontManager.getRunescapeSmallFont());
+        name.setForeground(OPEN_COLOR);
+        name.setToolTipText("Eligible for " + tile.getName());
+        row.add(name, BorderLayout.CENTER);
+
+        if (tile.getRequired() > 1 || tile.getProgress() > 0) {
+            JLabel progress = new JLabel(tile.getProgress() + "/" + tile.getRequired());
+            progress.setFont(FontManager.getRunescapeSmallFont());
+            progress.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
+            progress.setToolTipText(tile.getName());
+            row.add(progress, BorderLayout.EAST);
+        }
+
+        return row;
+    }
+
+    private static Set<Integer> creditedIds(BingoTile tile) {
+        Set<Integer> creditedIds = new HashSet<>();
+        for (BingoContribution contribution : tile.getClaimedItems()) {
+            creditedIds.add(contribution.getId());
+        }
+        return creditedIds;
     }
 
     private static String escape(String text) {

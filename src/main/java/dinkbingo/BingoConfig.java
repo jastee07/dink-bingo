@@ -19,16 +19,23 @@ public interface BingoConfig extends Config {
     String connectionSection = "Connection";
 
     @ConfigSection(
+        name = "Board Panel",
+        description = "How your team's board is displayed",
+        position = 10
+    )
+    String boardSection = "Board Panel";
+
+    @ConfigSection(
         name = "Detection",
         description = "What counts as a bingo drop",
-        position = 10
+        position = 20
     )
     String detectionSection = "Detection";
 
     @ConfigSection(
         name = "Announcements",
         description = "How accepted progress and completions are announced via Dink",
-        position = 20
+        position = 30
     )
     String announceSection = "Announcements";
 
@@ -70,6 +77,32 @@ public interface BingoConfig extends Config {
     )
     default int refreshMinutes() {
         return 5;
+    }
+
+    // -----------------------------------------------------------------------
+    // Board panel
+    // -----------------------------------------------------------------------
+
+    @ConfigItem(
+        keyName = "boardView",
+        name = "Board View",
+        description = "Show unfinished tile names or every item still eligible for an unfinished tile",
+        position = 11,
+        section = boardSection
+    )
+    default BoardView boardView() {
+        return BoardView.NAMED_TILES;
+    }
+
+    @ConfigItem(
+        keyName = "hideCompletedTiles",
+        name = "Hide Completed Tiles",
+        description = "Hide tiles your team has already completed from the sidebar",
+        position = 12,
+        section = boardSection
+    )
+    default boolean hideCompletedTiles() {
+        return false;
     }
 
     // -----------------------------------------------------------------------

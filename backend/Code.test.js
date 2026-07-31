@@ -363,11 +363,16 @@ assert.notStrictEqual(
   "team and tile ids must not collide in the in-memory claim index"
 );
 ["A5", "B5", "C5", "D5", "E5", "A26", "E25", "E26"].forEach(assertBalancedFormula);
+const claimCountFormulaCells = ["B5", "C5", "D5", "E5", "E26"];
+claimCountFormulaCells.forEach(cell => {
+  const formula = generatedFormula(cell);
+  assert(
+    formula.includes("COUNTUNIQUEIFS(Claims!D2:D") &&
+      formula.includes('Claims!D2:D,"<>"'),
+    cell + " must count distinct nonblank contributed item ids without treating no matches as one"
+  );
+});
 const remainingTilesFormula = generatedFormula("D5");
-assert(
-  remainingTilesFormula.includes("COUNTUNIQUE(FILTER(Claims!D2:D"),
-  "remaining tiles must count distinct contributed item ids"
-);
 assert(
   remainingTilesFormula.includes("Items!F2:F") && remainingTilesFormula.includes("<needed"),
   "remaining tiles must compare progress with required_count"

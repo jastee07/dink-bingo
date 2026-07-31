@@ -918,8 +918,8 @@ function setupLeaderboard(sh) {
     'required,MAP(tileIds,LAMBDA(tileId,LET(value,' +
     'INDEX(FILTER(Items!F2:F,Items!A2:A=tileId),1),IF(value="",1,value)))),' +
     'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,required,LAMBDA(tileId,needed,' +
-    'IF(IFERROR(COUNTUNIQUE(FILTER(Claims!D2:D,Claims!A2:A=team,' +
-    'Claims!B2:B=tileId)),0)>=needed,1,0))))))),"")'
+    'IF(COUNTUNIQUEIFS(Claims!D2:D,Claims!A2:A,team,Claims!B2:B,tileId,' +
+    'Claims!D2:D,"<>")>=needed,1,0))))))),"")'
   );
   sh.getRange('C5').setFormula(
     '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
@@ -928,8 +928,8 @@ function setupLeaderboard(sh) {
     'required,MAP(tileIds,LAMBDA(tileId,LET(value,' +
     'INDEX(FILTER(Items!F2:F,Items!A2:A=tileId),1),IF(value="",1,value)))),' +
     'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,tilePoints,required,LAMBDA(tileId,points,needed,' +
-    'IF(IFERROR(COUNTUNIQUE(FILTER(Claims!D2:D,Claims!A2:A=team,' +
-    'Claims!B2:B=tileId)),0)>=needed,' +
+    'IF(COUNTUNIQUEIFS(Claims!D2:D,Claims!A2:A,team,Claims!B2:B,tileId,' +
+    'Claims!D2:D,"<>")>=needed,' +
     'IF(points="",1,points),0))))))),"")'
   );
   sh.getRange('D5').setFormula(
@@ -938,8 +938,8 @@ function setupLeaderboard(sh) {
     'required,MAP(tileIds,LAMBDA(tileId,LET(value,' +
     'INDEX(FILTER(Items!F2:F,Items!A2:A=tileId),1),IF(value="",1,value)))),' +
     'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,required,LAMBDA(tileId,needed,' +
-    'IF(IFERROR(COUNTUNIQUE(FILTER(Claims!D2:D,Claims!A2:A=team,' +
-    'Claims!B2:B=tileId)),0)<needed,1,0))))))),"")'
+    'IF(COUNTUNIQUEIFS(Claims!D2:D,Claims!A2:A,team,Claims!B2:B,tileId,' +
+    'Claims!D2:D,"<>")<needed,1,0))))))),"")'
   );
   sh.getRange('E5').setFormula(
     '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
@@ -948,8 +948,8 @@ function setupLeaderboard(sh) {
     'required,MAP(tileIds,LAMBDA(tileId,LET(value,' +
     'INDEX(FILTER(Items!F2:F,Items!A2:A=tileId),1),IF(value="",1,value)))),' +
     'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,tilePoints,required,LAMBDA(tileId,points,needed,' +
-    'IF(IFERROR(COUNTUNIQUE(FILTER(Claims!D2:D,Claims!A2:A=team,' +
-    'Claims!B2:B=tileId)),0)<needed,' +
+    'IF(COUNTUNIQUEIFS(Claims!D2:D,Claims!A2:A,team,Claims!B2:B,tileId,' +
+    'Claims!D2:D,"<>")<needed,' +
     'IF(points="",1,points),0))))))),"")'
   );
 
@@ -969,8 +969,8 @@ function setupLeaderboard(sh) {
     'teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
     'MAKEARRAY(ROWS(tileIds),ROWS(teams),LAMBDA(rowIndex,columnIndex,' +
     'LET(team,INDEX(teams,columnIndex,1),tileId,INDEX(tileIds,rowIndex,1),' +
-    'needed,INDEX(required,rowIndex,1),progress,IFERROR(COUNTUNIQUE(FILTER(Claims!D2:D,' +
-    'Claims!A2:A=team,Claims!B2:B=tileId)),0),' +
+    'needed,INDEX(required,rowIndex,1),progress,COUNTUNIQUEIFS(Claims!D2:D,' +
+    'Claims!A2:A,team,Claims!B2:B,tileId,Claims!D2:D,"<>"),' +
     'claimedBy,IF(progress>=needed,INDEX(FILTER(Claims!F2:F,Claims!A2:A=team,' +
     'Claims!B2:B=tileId),needed),""),winningItem,IF(progress>=needed,' +
     'INDEX(FILTER(Claims!E2:E,Claims!A2:A=team,Claims!B2:B=tileId),needed),""),' +
