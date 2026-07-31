@@ -23,8 +23,10 @@ public class BingoVerificationOverlay extends OverlayPanel {
 
     private static final Color ACCENT = new Color(0x00, 0xB0, 0x50);
     private static final int WIDTH = 240;
+    private static final DateTimeFormatter DATE_FORMAT =
+        DateTimeFormatter.ofPattern("MM/dd/uuuu");
     private static final DateTimeFormatter TIME_FORMAT =
-        DateTimeFormatter.ofPattern("MMM d, uuuu  h:mm:ss a z");
+        DateTimeFormatter.ofPattern("h:mm a z");
 
     private final BingoConfig config;
     private final Clock clock;
@@ -52,8 +54,12 @@ public class BingoVerificationOverlay extends OverlayPanel {
             .left("Bingo verification")
             .leftColor(ACCENT)
             .build());
+        ZonedDateTime now = ZonedDateTime.now(clock);
         panelComponent.getChildren().add(LineComponent.builder()
-            .left(currentTimeText())
+            .left(formatDate(now))
+            .build());
+        panelComponent.getChildren().add(LineComponent.builder()
+            .left(formatTime(now))
             .build());
         panelComponent.getChildren().add(LineComponent.builder()
             .left("Code: " + verificationCodeText())
@@ -62,8 +68,12 @@ public class BingoVerificationOverlay extends OverlayPanel {
         return super.render(graphics);
     }
 
+    String currentDateText() {
+        return formatDate(ZonedDateTime.now(clock));
+    }
+
     String currentTimeText() {
-        return TIME_FORMAT.format(ZonedDateTime.now(clock));
+        return formatTime(ZonedDateTime.now(clock));
     }
 
     String verificationCodeText() {
@@ -72,5 +82,13 @@ public class BingoVerificationOverlay extends OverlayPanel {
             return "Not configured";
         }
         return code.trim();
+    }
+
+    private static String formatDate(ZonedDateTime dateTime) {
+        return DATE_FORMAT.format(dateTime);
+    }
+
+    private static String formatTime(ZonedDateTime dateTime) {
+        return TIME_FORMAT.format(dateTime);
     }
 }

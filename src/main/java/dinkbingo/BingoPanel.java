@@ -14,7 +14,6 @@ import javax.swing.BoxLayout;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
 import javax.swing.JLabel;
-import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
@@ -38,11 +37,8 @@ public class BingoPanel extends PluginPanel {
     private final JLabel statusLabel = new JLabel();
     private final JPanel itemsPanel = new JPanel();
     private final JButton refreshButton = new JButton("Refresh");
-    private final JButton testButton = new JButton("Send Discord test");
 
     private Runnable refreshHandler = () -> {
-    };
-    private Runnable testHandler = () -> {
     };
 
     @Inject
@@ -78,39 +74,12 @@ public class BingoPanel extends PluginPanel {
         itemsPanel.setLayout(new GridBagLayout());
         itemsPanel.setBackground(ColorScheme.DARK_GRAY_COLOR);
 
-        testButton.setFocusPainted(false);
-        testButton.setToolTipText("Send a clearly marked test through Dink; does not contact the board backend");
-        testButton.addActionListener(e -> {
-            int answer = JOptionPane.showConfirmDialog(
-                this,
-                "This sends one clearly marked message to the webhook configured in Dink Bingo or Dink.\n"
-                    + "It requests a screenshot but does not contact the board backend or claim a tile.\n\n"
-                    + "Continue?",
-                "Send Dink Bingo test",
-                JOptionPane.YES_NO_OPTION,
-                JOptionPane.WARNING_MESSAGE
-            );
-            if (answer == JOptionPane.YES_OPTION) {
-                testHandler.run();
-            }
-        });
-
-        JPanel footer = new JPanel(new BorderLayout());
-        footer.setBackground(ColorScheme.DARK_GRAY_COLOR);
-        footer.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
-        footer.add(testButton, BorderLayout.CENTER);
-
         add(header, BorderLayout.NORTH);
         add(itemsPanel, BorderLayout.CENTER);
-        add(footer, BorderLayout.SOUTH);
     }
 
     public void setRefreshHandler(Runnable handler) {
         this.refreshHandler = handler;
-    }
-
-    public void setTestHandler(Runnable handler) {
-        this.testHandler = handler;
     }
 
     /** Safe to call from any thread. */

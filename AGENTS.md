@@ -17,7 +17,7 @@ the normal Dink configuration and capture behavior.
 - `BingoDetector.java`: canonicalization, board matching, and in-flight/resolved dedupe.
 - `BingoClient.java`: Apps Script board/claim HTTP client and retry behavior.
 - `BingoAnnouncer.java`: Dink external-plugin payload; this is the screenshot/Discord boundary.
-- `BingoPanel.java`: sidebar board, refresh control, and manual Discord/screenshot test.
+- `BingoPanel.java`: sidebar board and refresh control.
 - `BingoConfig.java`: user-facing connection, detection, and announcement settings.
 - `BingoResponses.java`, `BingoBoard.java`, `BingoItem.java`: wire and view models.
 - `src/test/java/dinkbingo/`: focused JUnit/Mockito tests plus the side-loaded client main.
@@ -63,9 +63,8 @@ Unit tests must use mocks or `MockWebServer`; they must not call a deployed Apps
 real Discord webhook. Add regression coverage for changes to claim status handling, replay
 suppression, retry identity, URL types, and the Dink payload.
 
-The panel's **Send Discord test** button is the preferred screenshot/webhook integration test.
-It asks for confirmation, emits a conspicuous `[TEST]` Dink notification, and never calls
-the Apps Script or changes the board. Before clicking it:
+Use a reversible test tile and team when manually verifying screenshot/webhook integration.
+Before making the test claim:
 
 1. Use a throwaway Discord channel/webhook when possible.
 2. Enable Dink's **External Plugin Requests > Enable External Plugin Notifications**.
@@ -95,6 +94,6 @@ without explicit authorization and a reversible test tile/team.
 ## Verification expectations
 
 For ordinary Java changes, run `./gradlew test`. For integration changes, also side-load the
-client and use the manual test button with a test webhook. A successful unit test proves the
-payload is posted to RuneLite's event bus; only the manual test proves Dink accepted it,
+client and claim a reversible test tile with a test webhook. A successful unit test proves
+the payload is posted to RuneLite's event bus; only the manual claim proves Dink accepted it,
 captured an image, and Discord received the multipart webhook.

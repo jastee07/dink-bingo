@@ -120,7 +120,6 @@ public class BingoPlugin extends Plugin {
         clientToolbar.addNavigation(navButton);
 
         panel.setRefreshHandler(this::refreshBoard);
-        panel.setTestHandler(this::sendAnnouncementTest);
         panel.render(BingoBoard.EMPTY, bingoClient.isConfigured());
 
         scheduleRefresh();
@@ -145,8 +144,6 @@ public class BingoPlugin extends Plugin {
         navButton = null;
         overlayManager.remove(verificationOverlay);
         panel.setRefreshHandler(() -> {
-        });
-        panel.setTestHandler(() -> {
         });
         detector.setClaimListener((response, source) -> {
         });
@@ -331,22 +328,6 @@ public class BingoPlugin extends Plugin {
         // Re-fetch so the panel and the remaining set reflect the new state, including any
         // tiles teammates claimed while we were busy.
         refreshBoard();
-    }
-
-    private void sendAnnouncementTest() {
-        long lifecycle = lifecycleGeneration.get();
-        clientThread.invokeLater(() -> sendAnnouncementTest(lifecycle));
-    }
-
-    private void sendAnnouncementTest(long lifecycle) {
-        if (!isCurrent(lifecycle)) {
-            return;
-        }
-        announcer.announceTest(detector.getBoard());
-        sendChatMessage(
-            "Bingo: sent a test request to Dink. Check Dink's External Plugin Requests settings "
-                + "and the configured Discord webhook if it does not arrive."
-        );
     }
 
     private String describe(ClaimResponse response) {

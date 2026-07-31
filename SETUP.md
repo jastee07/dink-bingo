@@ -23,9 +23,12 @@ config. Total player-side effort is about a minute.
 6. **`Config` tab** — optionally set `event_start` / `event_end` (claims outside the window are
    rejected with `event_closed`) and leave `announce_from_backend` as `false` if your players
    run Dink.
-7. **`Leaderboard` tab** — read-only event view. It automatically shows claimed tiles, points,
-   and remaining tiles for every distinct team in `Teams`. Make corrections in `Items`,
-   `Teams`, or `Claims`; do not type over the leaderboard formulas.
+7. **`Leaderboard` tab** — read-only event view. It automatically shows claimed tiles, earned
+   points, remaining items, and remaining points for every distinct team in `Teams`. Make
+   corrections in `Items`, `Teams`, or `Claims`; do not type over the leaderboard formulas.
+
+When updating an existing event sheet to a newer `Code.gs`, run `refreshLeaderboard` once
+from the Apps Script editor. It refreshes only the derived leaderboard formulas and formatting.
 
 Keep the editable spreadsheet organizer-only. The `Config` tab contains the participant token,
 organizer-only admin token, and optional backend webhook. Hiding the tab is cosmetic and does
@@ -158,20 +161,9 @@ Grimy guam, say), kill something that drops it, and watch the tile close.
 | Every claim fails silently | Deployment is not *Who has access: Anyone*. The client log names this explicitly. |
 | Tile claimed by the wrong team | Use the admin unclaim above, then fix the `Teams` tab. |
 
-### Test Discord and screenshot delivery without claiming a tile
+### Screenshot verification overlay
 
 Before the event, optionally enable Dink Bingo's **Show Verification Overlay** and enter the
 organizer-provided **Bingo Verification Code**. The overlay stays visible until disabled and
 shows the player's current local date, time, time zone, and event code. Update the code for
 each bingo; a blank code is visibly labeled `Not configured`.
-
-In the Dink Bingo sidebar, click **Send Discord test** and confirm. It sends a clearly marked
-test through Dink's real external-plugin notification path and requests a screenshot, but it
-does not contact the Apps Script or modify the board. Use a throwaway webhook if possible and
-be logged in when checking screenshot capture. When the overlay is enabled, verify that all
-of its text is readable in the attached image.
-
-If nothing arrives, check `~/.runelite/logs/client.log` for `Dink Bingo`, `requested external
-dink`, or `ExternalPluginNotifier`. Then verify Dink's **Enable External Plugin
-Notifications**, **Send Image**, and webhook settings. Unit tests prove the payload shape;
-this manual test is what proves Dink accepted it and Discord received the image.

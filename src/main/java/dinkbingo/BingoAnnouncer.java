@@ -52,32 +52,7 @@ public class BingoAnnouncer {
 
         String itemName = claim.getItemName() != null ? claim.getItemName() : "an item";
         String team = claim.getTeam() != null ? claim.getTeam() : "their team";
-        post(claim, source, itemName, team, config.notifyMessage(), "Bingo tile claimed", false);
-    }
-
-    /**
-     * Exercises the real Dink external-notification and screenshot path without contacting
-     * the bingo backend or changing board state. The deliberately conspicuous copy keeps a
-     * test sent to a non-test webhook from looking like a genuine claim.
-     */
-    public void announceTest(BingoBoard board) {
-        ClaimResponse claim = new ClaimResponse();
-        claim.setStatus(BingoResponses.CLAIMED);
-        claim.setTeam(board.isConfigured() ? board.getTeam() + " (test)" : "Test Team");
-        claim.setItemId(1205); // Bronze dagger: stable icon for a synthetic notification.
-        claim.setItemName("Test tile - no claim was made");
-        claim.setRemaining(board.isConfigured() ? board.getRemainingCount() : 0);
-        claim.setTotal(board.isConfigured() ? board.getItems().size() : 0);
-
-        post(
-            claim,
-            "Manual test",
-            claim.getItemName(),
-            claim.getTeam(),
-            "[TEST] Dink Bingo Discord and screenshot check for %USERNAME%. No board tile was claimed.",
-            "Dink Bingo test",
-            true
-        );
+        post(claim, source, itemName, team, config.notifyMessage(), "Bingo tile claimed");
     }
 
     private void post(
@@ -86,8 +61,7 @@ public class BingoAnnouncer {
         String itemName,
         String team,
         String text,
-        String title,
-        boolean test
+        String title
     ) {
 
         Map<String, Object> data = new HashMap<>();
@@ -118,7 +92,6 @@ public class BingoAnnouncer {
         metadata.put("team", team);
         metadata.put("remaining", claim.getRemaining());
         metadata.put("points", claim.getPoints());
-        metadata.put("test", test);
         data.put("metadata", metadata);
 
         // Dink rejects the whole request unless every element is an okhttp3.HttpUrl.
@@ -136,7 +109,7 @@ public class BingoAnnouncer {
             }
         }
 
-        log.info("{} Dink notification for {}", test ? "Sending test" : "Announcing bingo claim", itemName);
+        log.info("Announcing bingo claim for {}", itemName);
         eventBus.post(new PluginMessage(DINK_NAMESPACE, DINK_NOTIFY, data));
     }
 
