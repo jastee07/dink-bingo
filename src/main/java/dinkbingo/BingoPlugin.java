@@ -38,7 +38,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 @Slf4j
 @PluginDescriptor(
-    name = "Dink Bingo",
+    name = "Bingo with Dink Notifications",
     description = "Claims bingo tiles on a shared board when you get the drop, and announces via Dink",
     tags = {"bingo", "dink", "loot", "clan", "event", "collection", "discord"}
 )
@@ -116,7 +116,7 @@ public class BingoPlugin extends Plugin {
 
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/bingo_icon.png");
         navButton = NavigationButton.builder()
-            .tooltip("Dink Bingo")
+            .tooltip("Bingo with Dink Notifications")
             .icon(icon)
             .priority(7)
             .panel(panel)

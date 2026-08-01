@@ -112,10 +112,10 @@ Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
 
 ## Player
 
-1. Install **Dink** and **Dink Bingo** from the Plugin Hub.
+1. Install **Dink** and **Bingo with Dink Notifications** from the Plugin Hub.
 2. In **Dink** → *External Plugin Requests* → enable **Enable External Plugin Notifications**,
    and make sure a Discord webhook is set.
-3. In **Dink Bingo**, paste the **Backend URL** and **Event Token**.
+3. In **Bingo with Dink Notifications**, paste the **Backend URL** and **Event Token**.
 4. Confirm the **Loot Tracker** plugin is enabled (it is by default). See below — this matters
    more than it looks.
 5. Open the bingo icon in the sidebar. If you see your team name and the tile list, you're done.
@@ -131,7 +131,7 @@ to remember to do anything when a drop lands.
 
 ## What actually gets detected
 
-**Dink Bingo does not read Dink's notifications.** It subscribes to RuneLite's own loot events
+**Bingo with Dink Notifications does not read Dink's notifications.** It subscribes to RuneLite's own loot events
 directly, and it has **no minimum value filter of any kind** — no gp threshold, no rarity
 threshold, nothing. A 1 gp tile claims exactly as reliably as a 1 billion gp tile.
 
@@ -157,7 +157,7 @@ to id 4151 still fires if the drop arrives as a noted whip.
 NPC kills come from a core RuneLite service and work regardless. **Everything else in that
 table — raids, chests, clue caskets, minigame rewards, pickpocketing — is emitted by the
 Loot Tracker plugin.** If a participant has Loot Tracker disabled, those drops are invisible to
-Dink Bingo (and to Dink). It's enabled by default, so this only bites people who turned it off,
+Bingo with Dink Notifications (and to Dink). It's enabled by default, so this only bites people who turned it off,
 but it's worth a one-line check in your event announcement.
 
 ### Not covered
@@ -199,7 +199,7 @@ Grimy guam, say), kill something that drops it, and watch the tile close.
 
 ### Screenshot verification overlay
 
-Before the event, optionally enable Dink Bingo's **Show Verification Overlay** and enter the
+Before the event, optionally enable **Show Verification Overlay** in Bingo with Dink Notifications and enter the
 organizer-provided **Bingo Verification Code**. The overlay stays visible until disabled and
 shows the player's current local date, time, time zone, and event code. Update the code for
 each bingo; a blank code is visibly labeled `Not configured`.

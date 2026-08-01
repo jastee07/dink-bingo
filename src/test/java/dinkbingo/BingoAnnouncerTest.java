@@ -52,7 +52,7 @@ class BingoAnnouncerTest {
         assertEquals("notify", message.getName());
 
         Map<String, Object> data = message.getData();
-        assertEquals("Dink Bingo", data.get("sourcePlugin"));
+        assertEquals("Bingo with Dink Notifications", data.get("sourcePlugin"));
         assertEquals("Bingo tile completed", data.get("title"));
         assertEquals(true, data.get("imageRequested"));
         assertEquals("https://static.runelite.net/cache/item/icon/4151.png", data.get("thumbnail"));

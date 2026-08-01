@@ -2,7 +2,7 @@
 
 ## Project purpose
 
-Dink Bingo is a Java 11 RuneLite Plugin Hub plugin. It detects bingo-board loot from
+Bingo with Dink Notifications is a Java 11 RuneLite Plugin Hub plugin. It detects bingo-board loot from
 RuneLite events, asks a deployed Google Apps Script to atomically claim the tile, and posts
 a `PluginMessage("dink", "notify", ...)` only when the backend returns `claimed`. Dink owns
 the Discord webhook POST and screenshot capture.
@@ -69,7 +69,7 @@ Before making the test claim:
 1. Use a throwaway Discord channel/webhook when possible.
 2. Enable Dink's **External Plugin Requests > Enable External Plugin Notifications**.
 3. Leave Dink's **External Plugin Requests > Send Image** at `Requested` or `Always`.
-4. Configure either Dink Bingo's override, Dink's external override, or Dink's primary URL.
+4. Configure either this plugin's override, Dink's external override, or Dink's primary URL.
 5. Be logged in if screenshot capture is being verified.
 
 The curl examples in `backend/README.md` are not read-only except `ping` and `board`.

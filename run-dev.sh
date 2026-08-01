@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch RuneLite in developer mode with Dink Bingo side-loaded, without Gradle in the loop.
+# Launch RuneLite in developer mode with Bingo with Dink Notifications side-loaded, without Gradle in the loop.
 # Regenerate the cached classpath after changing dependencies:  ./gradlew -q printClasspath
 set -euo pipefail
 cd "$(dirname "$0")"

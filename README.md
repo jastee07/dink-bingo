@@ -1,4 +1,4 @@
-# Dink Bingo
+# Bingo with Dink Notifications
 
 [![CI](https://github.com/jastee07/dink-bingo/actions/workflows/ci.yml/badge.svg)](https://github.com/jastee07/dink-bingo/actions/workflows/ci.yml)
 
@@ -10,7 +10,7 @@ It is a **companion** to [Dink](https://github.com/pajlads/DinkPlugin), not a fo
 both from the Plugin Hub; Dink keeps updating independently.
 
 ```
-Dink Bingo  ──(1) POST contribution ──▶  Apps Script ──▶  Google Sheet  (source of truth)
+Bingo with Dink Notifications  ──(1) POST contribution ──▶  Apps Script ──▶  Google Sheet  (source of truth)
             ◀─(2) progress / claimed / duplicate ─┘
             │
             └─(3) accepted progress or completion:
@@ -56,11 +56,11 @@ Existing sheets must follow the
 
 ### 2. Each player
 
-1. Install **Dink** and **Dink Bingo** from the Plugin Hub.
+1. Install **Dink** and **Bingo with Dink Notifications** from the Plugin Hub.
 2. In Dink: **External Plugin Requests → Enable External Plugin Notifications** must be on,
    and a Discord webhook must be set (either Dink's *Primary Webhook URLs*, its *External
-   Webhook Override*, or Dink Bingo's own *Bingo Webhook Override*).
-3. In Dink Bingo: paste the **Backend URL** and **Event Token**.
+   Webhook Override*, or this plugin's own *Bingo Webhook Override*).
+3. In Bingo with Dink Notifications: paste the **Backend URL** and **Event Token**.
 
 That's it — the player's RSN is matched against the `Teams` tab, so nobody has to pick their
 own team in config. The sidebar keeps the team summary and Refresh button visible while long

@@ -33,7 +33,7 @@ public class BingoAnnouncer {
 
     private static final String DINK_NAMESPACE = "dink";
     private static final String DINK_NOTIFY = "notify";
-    private static final String SOURCE_PLUGIN = "Dink Bingo";
+    private static final String SOURCE_PLUGIN = "Bingo with Dink Notifications";
     private static final String ITEM_ICON_URL = "https://static.runelite.net/cache/item/icon/";
     private static final String WIKI_SEARCH_URL = "https://oldschool.runescape.wiki/w/Special:Search?search=";
 

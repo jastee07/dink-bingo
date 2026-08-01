@@ -1,5 +1,5 @@
 /**
- * Dink Bingo backend — Google Apps Script web app bound to the board spreadsheet.
+ * Bingo with Dink Notifications backend — Google Apps Script web app bound to the board spreadsheet.
  *
  * The spreadsheet is the single source of truth for which team owns which tile.
  * Every mutating path runs inside a script lock so two simultaneous drops of the
@@ -726,7 +726,7 @@ function setupSheet() {
     setupLeaderboard(leaderboard);
   }
 
-  SpreadsheetApp.getUi().alert('Dink Bingo tabs and leaderboard are ready. Fill in Items and Teams, then Deploy > New deployment > Web app.');
+  SpreadsheetApp.getUi().alert('Bingo with Dink Notifications tabs and leaderboard are ready. Fill in Items and Teams, then Deploy > New deployment > Web app.');
 }
 
 /**
@@ -901,7 +901,7 @@ function setupLeaderboard(sh) {
     sh.insertColumnsAfter(sh.getMaxColumns(), 100 - sh.getMaxColumns());
   }
 
-  sh.getRange('A1').setValue('Dink Bingo Leaderboard');
+  sh.getRange('A1').setValue('Bingo with Dink Notifications Leaderboard');
   sh.getRange('A2').setValue(
     'Read-only view derived from Items, Teams, and Claims. Make event changes on those tabs.'
   );

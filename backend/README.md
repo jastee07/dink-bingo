@@ -1,4 +1,4 @@
-# Dink Bingo backend (Google Sheet + Apps Script)
+# Bingo with Dink Notifications backend (Google Sheet + Apps Script)
 
 The spreadsheet is the single source of truth for the board. The plugin never decides
 whether a tile is complete — it asks, and announces each accepted `progress` contribution
