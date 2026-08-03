@@ -39,6 +39,12 @@ tab shows each team's completed count, earned points, remaining tiles, remaining
 tile-by-team progress matrix; it is a derived view and never decides whether a contribution
 succeeds.
 
+If you configure `event_start` / `event_end`, first set **File → Settings → Time zone** on the
+spreadsheet. Use real Sheet date/time cells (recommended), or `yyyy-MM-dd HH:mm` text. That
+spreadsheet timezone is authoritative for all players; their local timezones do not affect
+claim eligibility. Both boundaries are inclusive, and the backend rejects out-of-window claims
+before writing to `Claims`.
+
 Keep the editable Sheet organizer-only. Players receive the `/exec` URL and event token, not
 Sheet access. The admin token and optional backend Discord webhook stay in the organizer-owned
 `Config` tab.

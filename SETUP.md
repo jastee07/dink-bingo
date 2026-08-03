@@ -39,10 +39,13 @@ config. Total player-side effort is about a minute.
    lives. RSNs are matched case-insensitively with `_` treated as a space, so `Zezima` and
    `zez ima` behave as you'd expect. Use the exact same spelling and capitalization for every
    member of a team; each distinct team name gets its own claim state for every logical tile.
-6. **`Config` tab** — optionally set `event_start` / `event_end` (claims outside the window are
-   rejected with `event_closed`) and leave `announce_from_backend` as `false` if your players
-   run Dink.
-7. **`Leaderboard` tab** — read-only event view. It shows K-of-N progress, completed tiles,
+6. **Event time zone** — in **File → Settings**, set the spreadsheet **Time zone** to the
+   organizer's intended event timezone. This single setting is authoritative for every player.
+7. **`Config` tab** — optionally set `event_start` / `event_end` as real Sheet date/time cells
+   (recommended), or `yyyy-MM-dd HH:mm` text interpreted in the spreadsheet timezone. Start and
+   end are inclusive; claims outside the window are rejected with `event_closed`. Invalid or
+   reversed boundaries fail closed. Leave `announce_from_backend` as `false` if players run Dink.
+8. **`Leaderboard` tab** — read-only event view. It shows K-of-N progress, completed tiles,
    earned points, remaining tiles, and remaining points for every team. Points are awarded only
    when progress reaches `required_count`. Make corrections in `Items`, `Teams`, or `Claims`;
    do not type over the leaderboard formulas.

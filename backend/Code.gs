@@ -637,11 +637,47 @@ function tokenValid(cfg, token) {
   return String(token || '') === String(cfg.token);
 }
 
-function eventOpen(cfg) {
-  var now = new Date();
-  if (cfg.event_start && now < new Date(cfg.event_start)) return false;
-  if (cfg.event_end && now > new Date(cfg.event_end)) return false;
+function eventOpen(cfg, now) {
+  var current = now || new Date();
+  var start = parseEventBoundary(cfg.event_start, 'event_start');
+  var end = parseEventBoundary(cfg.event_end, 'event_end');
+  if (start && end && start.getTime() > end.getTime()) {
+    throw new Error('event_start must be before event_end');
+  }
+  if (start && current.getTime() < start.getTime()) return false;
+  if (end && current.getTime() > end.getTime()) return false;
   return true;
+}
+
+/**
+ * Sheet date/time cells arrive as Date objects and therefore already represent an absolute
+ * instant. Text boundaries are deliberately interpreted in the spreadsheet's timezone so
+ * player, browser, and Apps Script timezones cannot change the event window.
+ */
+function parseEventBoundary(value, key) {
+  if (value == null || String(value).trim() === '') return null;
+
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    if (!isNaN(value.getTime())) return value;
+    throw new Error(key + ' is not a valid date/time');
+  }
+
+  var text = String(value).trim();
+  var parsed;
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(text)) {
+    parsed = new Date(text);
+  } else if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(text)) {
+    var timeZone = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+    parsed = Utilities.parseDate(text, timeZone, 'yyyy-MM-dd HH:mm');
+  } else {
+    throw new Error(key +
+      ' must be a Sheet date/time or text in yyyy-MM-dd HH:mm format');
+  }
+
+  if (!parsed || isNaN(parsed.getTime())) {
+    throw new Error(key + ' is not a valid date/time');
+  }
+  return parsed;
 }
 
 function truthy(v) {

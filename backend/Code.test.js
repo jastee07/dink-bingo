@@ -57,7 +57,10 @@ const context = {
   },
   SpreadsheetApp: {
     getActiveSpreadsheet() {
-      return { getSheetByName: name => sheets[name] ? fakeSheet(name) : null };
+      return {
+        getSheetByName: name => sheets[name] ? fakeSheet(name) : null,
+        getSpreadsheetTimeZone: () => "America/New_York"
+      };
     },
     flush() {}
   },
@@ -79,7 +82,15 @@ const context = {
     }
   },
   Utilities: {
-    getUuid: () => "generated-uuid"
+    getUuid: () => "generated-uuid",
+    parseDate(text, timeZone, format) {
+      assert.strictEqual(timeZone, "America/New_York");
+      assert.strictEqual(format, "yyyy-MM-dd HH:mm");
+      const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(text);
+      if (!match) throw new Error("invalid test date");
+      // These tests use winter dates, when America/New_York is UTC-05:00.
+      return new Date(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:00-05:00`);
+    }
   }
 };
 vm.createContext(context);
@@ -132,6 +143,51 @@ assert.deepStrictEqual(JSON.parse(JSON.stringify(sanitized)), {
 assert.strictEqual(context.tokenValid({}, "anything"), false);
 assert.strictEqual(context.tokenValid({token: "expected"}, "expected"), true);
 assert.strictEqual(context.tokenValid({token: "expected"}, "wrong"), false);
+
+const eventStart = new Date("2026-01-10T15:00:00Z");
+const eventEnd = new Date("2026-01-10T17:00:00Z");
+assert.strictEqual(context.eventOpen(
+  {event_start: eventStart, event_end: eventEnd},
+  new Date("2026-01-10T15:00:00Z")
+), true, "the start instant is inclusive");
+assert.strictEqual(context.eventOpen(
+  {event_start: eventStart, event_end: eventEnd},
+  new Date("2026-01-10T17:00:00Z")
+), true, "the end instant is inclusive");
+assert.strictEqual(context.eventOpen(
+  {event_start: eventStart, event_end: eventEnd},
+  new Date("2026-01-10T17:00:00.001Z")
+), false, "claims after the end instant are closed");
+assert.strictEqual(context.eventOpen(
+  {event_start: "2026-01-10 10:00", event_end: "2026-01-10 12:00"},
+  new Date("2026-01-10T16:00:00Z")
+), true, "text boundaries use the spreadsheet timezone");
+assert.throws(
+  () => context.eventOpen({event_start: "01/10/2026 10:00"}, eventStart),
+  /must be a Sheet date\/time/,
+  "ambiguous text dates fail closed"
+);
+assert.throws(
+  () => context.eventOpen({event_start: eventEnd, event_end: eventStart}, eventStart),
+  /event_start must be before event_end/
+);
+
+sheets.Config.push(["event_start", new Date(Date.now() + 60 * 60 * 1000)]);
+const claimsBeforeClosedAttempt = sheets.Claims.length;
+const closed = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "before-event"
+}));
+assert.strictEqual(closed.status, "event_closed");
+assert.strictEqual(
+  sheets.Claims.length,
+  claimsBeforeClosedAttempt,
+  "an out-of-window drop must not create a Claims row"
+);
+sheets.Config.pop();
 
 const first = output(context.handleClaim({
   token: "participant-secret",

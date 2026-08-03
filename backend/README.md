@@ -31,9 +31,14 @@ and the final `claimed` contribution.
    fail visibly. `required_count` is a whole number between 1 and the number of distinct tile
    options. Use `1` for 1-of-N and `3` for 3-of-5. Counts are based on distinct item ids, not
    stack quantity. Fill in `Teams` as `rsn` → `team`; team names are exact identifiers.
-5. Optionally set `discord_webhook`, `event_start`, `event_end`, and
-   `announce_from_backend` in `Config`. Leave `announce_from_backend` as `false` if your
-   players run Dink — Dink's own announcement includes a screenshot, the backend's does not.
+5. In **File → Settings**, set the spreadsheet **Time zone** to the organizer's intended event
+   timezone. Optionally set `discord_webhook`, `event_start`, `event_end`, and
+   `announce_from_backend` in `Config`. Enter start/end as real Google Sheets date/time values
+   (recommended), or as text in `yyyy-MM-dd HH:mm` format. Text values use the spreadsheet
+   timezone; ISO 8601 text must include `Z` or an explicit UTC offset. Start and end are
+   inclusive, and invalid or reversed boundaries reject requests instead of opening the event.
+   Leave `announce_from_backend` as `false` if your players run Dink — Dink's own announcement
+   includes a screenshot, the backend's does not.
 6. **Deploy → New deployment → Web app**, *Execute as* **Me**, *Who has access* **Anyone**.
    Copy the `/exec` URL.
 
@@ -69,6 +74,12 @@ the `/exec` URL stays the same.
 Claim responses: `progress`, `claimed`, `duplicate`, `not_on_board`, `not_on_team`,
 `event_closed`, or `error`. `progress` and `claimed` trigger announcements; duplicates and
 failures do not.
+
+The client uses `eventOpen` from each board refresh to avoid submitting drops outside the
+window. The backend checks the same window again while holding the claim lock immediately
+before any new `Claims` row is written, so a stale client cannot count an out-of-window drop.
+Retries of a claim already committed inside the window may still return that original result
+after the end; they never create another claim.
 
 ### Concurrency and retries
 
