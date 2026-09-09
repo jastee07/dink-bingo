@@ -267,7 +267,6 @@ const undoLockScoped = output(context.handleUnclaim({
 }));
 assert.strictEqual(undoLockScoped.status, "unclaimed");
 
-// Rejections that cannot produce a Claims row must not contend for the lock at all.
 sheetReadsUnderLock.length = 0;
 const strangerClaim = output(context.handleClaim({
   token: "participant-secret",
@@ -278,9 +277,9 @@ const strangerClaim = output(context.handleClaim({
 }));
 assert.strictEqual(strangerClaim.status, "not_on_team");
 assert.deepStrictEqual(
-  sheetReadsUnderLock,
-  [],
-  "a not_on_team rejection must not read any sheet under the lock"
+  Array.from(new Set(sheetReadsUnderLock)).sort(),
+  ["Claims"],
+  "a not_on_team rejection must not read Items or Teams under the lock"
 );
 
 sheetReadsUnderLock.length = 0;
@@ -293,11 +292,40 @@ const offBoardClaim = output(context.handleClaim({
 }));
 assert.strictEqual(offBoardClaim.status, "not_on_board");
 assert.deepStrictEqual(
-  sheetReadsUnderLock,
-  [],
-  "a not_on_board rejection must not read any sheet under the lock"
+  Array.from(new Set(sheetReadsUnderLock)).sort(),
+  ["Claims"],
+  "a not_on_board rejection must not read Items or Teams under the lock"
 );
-assert.strictEqual(lockDepth, 0, "the audit lock is released on the rejection paths");
+assert.strictEqual(lockDepth, 0, "the rejection paths release the lock");
+
+// Rosters change mid-event when a player is subbed out. A retry of a claim the Sheet already
+// committed must still replay: the client treats not_on_team as a resolved outcome, so a
+// rejection here would stop the retry and lose the announcement for a real claim. This is why
+// the team check stays behind the claimId replay check even though Teams is read earlier.
+const teamsBeforeSubOut = sheets.Teams.map(row => row.slice());
+sheets.Teams = [["rsn", "team"], ["substitute", "Team One"]];
+const replayAfterSubOut = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "group-claim-1"
+}));
+assert.strictEqual(replayAfterSubOut.status, "claimed");
+assert.strictEqual(replayAfterSubOut.replay, true);
+assert.strictEqual(replayAfterSubOut.team, "Team One");
+
+// A brand new claim from the subbed-out player is still rejected.
+const freshAfterSubOut = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 21034,
+  itemName: "Dexterous prayer scroll",
+  claimId: "after-sub-out"
+}));
+assert.strictEqual(freshAfterSubOut.status, "not_on_team");
+sheets.Teams = teamsBeforeSubOut;
+assert.strictEqual(sheets.Claims.length, 2, "the sub-out probes must not write a claim");
 
 const board = output(context.handleBoard({
   token: "participant-secret",
