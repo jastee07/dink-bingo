@@ -135,6 +135,33 @@ function handleClaim(body) {
     return json({ status: 'error', error: 'bad_request' });
   }
 
+  // Items and Teams are static for the duration of an event, so read them before taking the
+  // lock. A full getDataRange() round trip is the slow part of any Apps Script call, and
+  // holding the global lock across three of them inflates the hold time for every claim --
+  // precisely during the burst of simultaneous drops the lock exists to serialize. Claims is
+  // the mutable state and is still read under the lock below.
+  var catalog = readTiles();
+  var team = resolveTeam(rsn);
+  var tile = catalog.byItemId[itemId];
+
+  // Neither rejection can be recorded in Claims, so answer both without contending for the
+  // lock at all. This runs ahead of the claimId replay check, so an organizer who edits Teams
+  // or Items mid-event turns a later retry of an already-committed claim into a rejection
+  // rather than a replay. Those tabs are not expected to change while an event is open, and
+  // the Claims row stays authoritative either way.
+  if (!team) {
+    audit(rsn, itemId, 'not_on_team', body, '');
+    return json({ status: 'not_on_team' });
+  }
+
+  if (!tile) {
+    audit(rsn, itemId, 'not_on_board', body, '');
+    return json({ status: 'not_on_board' });
+  }
+
+  body.tileId = tile.id;
+  var item = findOption(tile, itemId);
+
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
     // Caller retries with the same claimId, so refusing here is safe.
@@ -142,7 +169,6 @@ function handleClaim(body) {
   }
 
   try {
-    var catalog = readTiles();
     var claims = readClaims();
 
     // Idempotency first: a retried POST must return the original outcome rather
@@ -169,20 +195,6 @@ function handleClaim(body) {
       auditLocked(rsn, itemId, 'event_closed', body, '');
       return json({ status: 'event_closed' });
     }
-
-    var team = resolveTeam(rsn);
-    if (!team) {
-      auditLocked(rsn, itemId, 'not_on_team', body, '');
-      return json({ status: 'not_on_team' });
-    }
-
-    var tile = catalog.byItemId[itemId];
-    if (!tile) {
-      auditLocked(rsn, itemId, 'not_on_board', body, '');
-      return json({ status: 'not_on_board' });
-    }
-    body.tileId = tile.id;
-    var item = findOption(tile, itemId);
 
     var state = getClaimState(claims, team, tile.id);
     if (tileComplete(tile, state)) {

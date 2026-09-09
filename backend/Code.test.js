@@ -28,9 +28,15 @@ const sheets = {
   ]
 };
 
+// Tracks which tabs are read while the script lock is held. Every getDataRange() call is a
+// slow round trip, so anything recorded here lengthens the hold time for every other claim.
+let lockDepth = 0;
+const sheetReadsUnderLock = [];
+
 function fakeSheet(name) {
   return {
     getDataRange() {
+      if (lockDepth > 0) sheetReadsUnderLock.push(name);
       return { getValues: () => sheets[name].map(row => row.slice()) };
     },
     appendRow(row) {
@@ -69,14 +75,20 @@ const context = {
       let held = false;
       return {
         tryLock() {
-          held = true;
+          if (!held) {
+            held = true;
+            lockDepth++;
+          }
           return true;
         },
         hasLock() {
           return held;
         },
         releaseLock() {
-          held = false;
+          if (held) {
+            held = false;
+            lockDepth--;
+          }
         }
       };
     }
@@ -228,6 +240,64 @@ assert.strictEqual(replay.status, "claimed");
 assert.strictEqual(replay.replay, true);
 assert.strictEqual(replay.itemId, 4151);
 assert.strictEqual(sheets.Claims.length, 2);
+
+// Only the mutable Claims tab may be read while the lock is held. Items and Teams are static
+// for the duration of an event, so reading them under the lock would inflate the hold time
+// for every concurrent claim without buying any consistency.
+sheetReadsUnderLock.length = 0;
+const lockScoped = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 11832,
+  itemName: "Bandos chestplate",
+  claimId: "lock-scope-1"
+}));
+assert.strictEqual(lockScoped.status, "claimed");
+assert.deepStrictEqual(
+  Array.from(new Set(sheetReadsUnderLock)).sort(),
+  ["Claims"],
+  "only mutable state may be read while the script lock is held"
+);
+assert.strictEqual(lockDepth, 0, "handleClaim must release the lock it took");
+
+const undoLockScoped = output(context.handleUnclaim({
+  admin_token: "organizer-secret",
+  team: "Team One",
+  tile_id: "11832"
+}));
+assert.strictEqual(undoLockScoped.status, "unclaimed");
+
+// Rejections that cannot produce a Claims row must not contend for the lock at all.
+sheetReadsUnderLock.length = 0;
+const strangerClaim = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Not On Any Team",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "stranger-1"
+}));
+assert.strictEqual(strangerClaim.status, "not_on_team");
+assert.deepStrictEqual(
+  sheetReadsUnderLock,
+  [],
+  "a not_on_team rejection must not read any sheet under the lock"
+);
+
+sheetReadsUnderLock.length = 0;
+const offBoardClaim = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 995,
+  itemName: "Coins",
+  claimId: "off-board-1"
+}));
+assert.strictEqual(offBoardClaim.status, "not_on_board");
+assert.deepStrictEqual(
+  sheetReadsUnderLock,
+  [],
+  "a not_on_board rejection must not read any sheet under the lock"
+);
+assert.strictEqual(lockDepth, 0, "the audit lock is released on the rejection paths");
 
 const board = output(context.handleBoard({
   token: "participant-secret",
