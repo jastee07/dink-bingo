@@ -18,6 +18,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      # gradle/actions/setup-gradle validates the committed wrapper jar by
+      # default, so this is deliberately redundant. It is kept explicit so the
+      # check survives a change to how Gradle is set up below, and so it fails
+      # before anything else runs. Do not add a second copy.
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v6
+
       - name: Set up Java 11
         uses: actions/setup-java@v5
         with:

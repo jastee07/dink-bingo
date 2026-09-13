@@ -1,0 +1,36 @@
+# Dependency update policy for the plugin build and the CI workflow.
+#
+# Most Gradle dependencies in build.gradle.kts are pinned deliberately, with the
+# reason written beside each one. Those pins are ignored here so Dependabot does
+# not reopen the same unmergeable pull request every month.
+version: 2
+
+updates:
+  - package-ecosystem: gradle
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    ignore:
+      # Floats on latest.release so the plugin always compiles against the
+      # current RuneLite client. Pinning it would defeat that.
+      - dependency-name: "net.runelite:client"
+
+      # Verified by RuneLite for the Plugin Hub. Bumping either one risks
+      # failing Plugin Hub verification.
+      - dependency-name: "org.projectlombok:lombok"
+      - dependency-name: "org.jetbrains:annotations"
+
+      # Held at 5.5.2 (launcher 1.5.2), the last release before junit-bom was
+      # added to the published poms, which Plugin Hub verification rejects.
+      - dependency-name: "org.junit.jupiter:*"
+      - dependency-name: "org.junit.platform:*"
+
+      # Held at 4.11.0 against the RuneLite client's own Mockito 3.1.0.
+      - dependency-name: "org.mockito:mockito-core"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
