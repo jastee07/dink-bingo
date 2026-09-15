@@ -12,7 +12,7 @@ config. Total player-side effort is about a minute.
 1. Create a new Google Sheet.
 2. **Extensions → Apps Script**, delete the placeholder, paste [`backend/Code.gs`](backend/Code.gs), save.
 3. Run `setupSheet` once from the editor and approve the permission prompt. It creates the
-   `Items`, `Teams`, `Claims`, `Audit`, `Config`, and `Leaderboard` tabs and generates a
+   `Items`, `Teams`, `Claims`, `Attempts`, `Audit`, `Config`, and `Leaderboard` tabs and generates a
    `token` and `admin_token`.
 4. **`Items` tab** — one row per accepted item, with columns
    `tile_id`, `tile_name`, `item_id`, `item_name`, `points`, `required_count`, `notes`.
@@ -219,6 +219,7 @@ Grimy guam, say), kill something that drops it, and watch the tile close.
 | Chat says progress/claimed, nothing in Discord | Dink's *Enable External Plugin Notifications* is off, or no webhook is set. |
 | Every claim fails silently | Deployment is not *Who has access: Anyone*. The client log names this explicitly. |
 | Contribution credited to the wrong team | Use item-level or whole-tile admin unclaim above, then fix the `Teams` tab. |
+| Chat says "claim failed (claim_id_conflict)" | The same claim id was reused for a different RSN or item. The backend refuses to replay another player's outcome. Harmless on its own; report it if it repeats. |
 | Panel says "Backend error: Claims row N ..." | A `Claims` row credits a tile or item that `Items` no longer lists, usually a manual edit or a mid-event rename. The `Leaderboard` tab's **Claims integrity** cell shows the same thing. Restore the tile/option in `Items`, or remove the row with admin unclaim. Board loads and claims both fail until it is fixed. |
 
 ### Screenshot verification overlay

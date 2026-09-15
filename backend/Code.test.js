@@ -20,6 +20,10 @@ const sheets = {
   Audit: [
     ["ts", "rsn", "item_id", "result", "notes", "raw_payload", "tile_id"]
   ],
+  Attempts: [
+    ["claim_id", "rsn", "team", "item_id", "status", "tile_id", "tile_name", "item_name",
+      "complete", "recorded_at"]
+  ],
   Config: [
     ["key", "value"],
     ["token", "participant-secret"],
@@ -276,7 +280,7 @@ const lockScoped = output(context.handleClaim({
 assert.strictEqual(lockScoped.status, "claimed");
 assert.deepStrictEqual(
   Array.from(new Set(sheetReadsUnderLock)).sort(),
-  ["Claims"],
+  ["Attempts", "Claims"],
   "only mutable state may be read while the script lock is held"
 );
 assert.strictEqual(lockDepth, 0, "handleClaim must release the lock it took");
@@ -299,7 +303,7 @@ const strangerClaim = output(context.handleClaim({
 assert.strictEqual(strangerClaim.status, "not_on_team");
 assert.deepStrictEqual(
   Array.from(new Set(sheetReadsUnderLock)).sort(),
-  ["Claims"],
+  ["Attempts", "Claims"],
   "a not_on_team rejection must not read Items or Teams under the lock"
 );
 
@@ -314,7 +318,7 @@ const offBoardClaim = output(context.handleClaim({
 assert.strictEqual(offBoardClaim.status, "not_on_board");
 assert.deepStrictEqual(
   Array.from(new Set(sheetReadsUnderLock)).sort(),
-  ["Claims"],
+  ["Attempts", "Claims"],
   "a not_on_board rejection must not read Items or Teams under the lock"
 );
 assert.strictEqual(lockDepth, 0, "the rejection paths release the lock");
@@ -954,5 +958,229 @@ assert(
   integrityFormula.includes("Claims!A2:A<>"),
   "blank Claims padding rows must not be reported as invalid"
 );
+
+// ---------------------------------------------------------------------------
+// Terminal rejections are idempotent across a lost response (#36).
+//
+// Accepted contributions already replay from their Claims row. Rejections went only to Audit,
+// which is never consulted, so a retry of the same claimId after a lost HTTP response was
+// re-evaluated against whatever the state had become by then.
+// ---------------------------------------------------------------------------
+
+const claimsBeforeLedger = sheets.Claims.map(row => row.slice());
+const itemsBeforeLedger = sheets.Items.map(row => row.slice());
+const teamsBeforeLedger = sheets.Teams.map(row => row.slice());
+sheets.Claims = [claimsBeforeLedger[0].slice()];
+
+// A drop rejected just before event_start used to be accepted by its own retry a moment
+// after the event opened, silently extending the event for one player.
+sheets.Config.push(["event_start", new Date(Date.now() + 60 * 60 * 1000)]);
+const rejectedBeforeStart = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "lost-response-start"
+}));
+assert.strictEqual(rejectedBeforeStart.status, "event_closed");
+sheets.Config.pop();
+
+const retryAfterEventOpened = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "lost-response-start"
+}));
+assert.strictEqual(
+  retryAfterEventOpened.status,
+  "event_closed",
+  "a retry must return the original outcome even though the event has since opened"
+);
+assert.strictEqual(retryAfterEventOpened.replay, true);
+assert.strictEqual(
+  sheets.Claims.length,
+  1,
+  "the replayed rejection must not create a Claims row"
+);
+
+// A fresh drop of the same item is a different operation and is accepted normally.
+const freshAfterOpen = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "fresh-after-open"
+}));
+assert.strictEqual(
+  freshAfterOpen.status,
+  "claimed",
+  "a new claim id is evaluated against current state, not the ledger"
+);
+
+// A roster edit between attempts used to turn not_on_team into an accepted claim.
+sheets.Claims = [claimsBeforeLedger[0].slice()];
+sheets.Teams = [["rsn", "team"], ["someone else", "Team One"]];
+const rejectedOffRoster = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "lost-response-team"
+}));
+assert.strictEqual(rejectedOffRoster.status, "not_on_team");
+
+sheets.Teams = [["rsn", "team"], ["jake", "Team One"]];
+const retryAfterRosterFixed = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "lost-response-team"
+}));
+assert.strictEqual(
+  retryAfterRosterFixed.status,
+  "not_on_team",
+  "a retry must not become an accepted claim because Teams changed"
+);
+assert.strictEqual(retryAfterRosterFixed.replay, true);
+assert.strictEqual(sheets.Claims.length, 1, "the replayed rejection wrote nothing");
+
+// The same for a board edit between attempts.
+const rejectedOffBoard = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 995,
+  itemName: "Coins",
+  claimId: "lost-response-board"
+}));
+assert.strictEqual(rejectedOffBoard.status, "not_on_board");
+
+sheets.Items.push(["coins", "Coins", 995, "Coins", 1, 1, ""]);
+const retryAfterBoardGrew = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 995,
+  itemName: "Coins",
+  claimId: "lost-response-board"
+}));
+assert.strictEqual(
+  retryAfterBoardGrew.status,
+  "not_on_board",
+  "a retry must not become an accepted claim because Items changed"
+);
+assert.strictEqual(retryAfterBoardGrew.replay, true);
+assert.strictEqual(
+  retryAfterBoardGrew.itemName,
+  "Coins",
+  "the replay carries the fields the client needs to describe the outcome"
+);
+sheets.Items = itemsBeforeLedger.map(row => row.slice());
+
+// A duplicate is terminal too, and replays with the fields describe() renders.
+sheets.Claims = [claimsBeforeLedger[0].slice()];
+output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "ledger-winner"
+}));
+const duplicateRejection = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 21034,
+  itemName: "Dexterous prayer scroll",
+  claimId: "lost-response-duplicate"
+}));
+assert.strictEqual(duplicateRejection.status, "duplicate");
+
+const retriedDuplicate = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 21034,
+  itemName: "Dexterous prayer scroll",
+  claimId: "lost-response-duplicate"
+}));
+assert.strictEqual(retriedDuplicate.status, "duplicate");
+assert.strictEqual(retriedDuplicate.replay, true);
+assert.strictEqual(
+  retriedDuplicate.complete,
+  true,
+  "the replayed duplicate still reports that the tile was already complete"
+);
+assert.strictEqual(retriedDuplicate.tileName, "Any rare drop");
+
+// Claims stays authoritative: an accepted contribution replays from its own row, never from
+// the ledger, because a row in Claims means the contribution really happened.
+const acceptedReplay = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  claimId: "ledger-winner"
+}));
+assert.strictEqual(acceptedReplay.status, "claimed");
+assert.strictEqual(acceptedReplay.replay, true);
+
+// A claim id names one operation. Reusing it for a different player or item must fail closed
+// rather than report somebody else's outcome.
+const conflictingRsn = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "someone else",
+  itemId: 21034,
+  itemName: "Dexterous prayer scroll",
+  claimId: "lost-response-duplicate"
+}));
+assert.strictEqual(conflictingRsn.error, "claim_id_conflict");
+
+const conflictingItem = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 11832,
+  itemName: "Bandos chestplate",
+  claimId: "lost-response-duplicate"
+}));
+assert.strictEqual(conflictingItem.error, "claim_id_conflict");
+assert.strictEqual(lockDepth, 0, "the conflict path released the script lock");
+
+// The ledger holds operational fields only.
+const ledgerText = JSON.stringify(sheets.Attempts);
+["participant-secret", "organizer-secret", "discord", "token"].forEach(secret => {
+  assert(
+    !ledgerText.includes(secret),
+    "the Attempts ledger must never store credentials: found " + secret
+  );
+});
+
+// A deployment that has not re-run setupSheet has no Attempts tab. Claims must keep working
+// with the old semantics rather than every claim failing mid-event on a missing tab.
+const ledgerRows = sheets.Attempts;
+delete sheets.Attempts;
+sheets.Claims = [claimsBeforeLedger[0].slice()];
+const legacyRejection = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 995,
+  itemName: "Coins",
+  claimId: "legacy-backend-1"
+}));
+assert.strictEqual(
+  legacyRejection.status,
+  "not_on_board",
+  "a sheet without the Attempts tab still decides claims"
+);
+const legacyAccepted = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "legacy-backend-2"
+}));
+assert.strictEqual(legacyAccepted.status, "claimed");
+assert.strictEqual(lockDepth, 0, "the legacy path released the script lock");
+sheets.Attempts = ledgerRows;
+
+sheets.Claims = claimsBeforeLedger;
+sheets.Teams = teamsBeforeLedger;
 
 console.log("Apps Script grouped-tile and security tests passed");

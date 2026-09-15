@@ -9,7 +9,7 @@ and the final `claimed` contribution.
 1. Create a new Google Sheet.
 2. **Extensions → Apps Script**, delete the placeholder, paste [`Code.gs`](Code.gs), save.
 3. Run `setupSheet` once from the editor (approve the permission prompt). This creates the
-   `Items`, `Teams`, `Claims`, `Audit`, `Config`, and `Leaderboard` tabs and generates a
+   `Items`, `Teams`, `Claims`, `Attempts`, `Audit`, `Config`, and `Leaderboard` tabs and generates a
    `token` and `admin_token`.
 4. Fill in `Items` using
    `tile_id`, `tile_name`, `item_id`, `item_name`, `points`, `required_count`, `notes`.
@@ -91,10 +91,11 @@ Every mutating path holds `LockService.getScriptLock()`. A team/tile/item combin
 produce only one contribution row. Different accepted item ids can each advance a threshold
 tile until it completes; later contributions are duplicates.
 
-`Claims` is the only tab read while the lock is held. A claim reads `Items` and `Teams`
-before acquiring it, because a full sheet read is the slow part of the request and holding
-the lock across three of them lengthens the queue for every other claim in a burst. The
-checks that consume those reads still run inside the lock, in the same order as before.
+Only mutable state — `Claims` and `Attempts` — is read while the lock is held. A claim reads
+`Items` and `Teams` before acquiring it, because a full sheet read is the slow part of the
+request and holding the lock across all of them lengthens the queue for every other claim in
+a burst. The checks that consume those reads still run inside the lock, in the same order as
+before.
 
 The script lock only serializes runs of this script. It has never prevented an organizer from
 editing a tab in the browser mid-claim, so reading `Items` and `Teams` a moment earlier does
@@ -107,6 +108,23 @@ falsely reporting a duplicate. This ordering matters when a player is subbed out
 a claim the Sheet already committed replays, rather than becoming `not_on_team` and losing
 the announcement for a drop that was genuinely recorded. New claims from a subbed-out player
 are rejected as normal.
+
+Terminal *rejections* replay too, from the `Attempts` tab. Previously they were written only
+to `Audit`, which is never consulted, so a retry after a lost response was re-evaluated
+against whatever the state had become. A drop rejected just before `event_start` could be
+accepted by its own retry a moment after the event opened; a `Teams` or `Items` edit between
+attempts could flip `not_on_team` or `not_on_board` either way. `Attempts` records
+`event_closed`, `not_on_team`, `not_on_board`, and `duplicate` against the claim id so the
+answer is stable, and stores operational fields only — never a token.
+
+`Claims` still wins: an accepted contribution replays from its own row, because a row there
+means the contribution really happened. Only when nothing was accepted does the ledger apply.
+Reusing one claim id for a different RSN or item id returns `claim_id_conflict` rather than
+replaying somebody else's outcome. A replayed rejection writes no `Claims` row, adds no
+`Audit` row, and is never announced.
+
+A new drop of the same item gets a new claim id, so it is evaluated against current state as
+normal. The ledger only ever pins a retry of the *same* operation.
 
 When the original HTTP response is lost after the Sheet committed the claim, that replay is
 the first successful response the client sees, so the running client sends one Dink request.
@@ -188,19 +206,26 @@ For every existing sheet using the original one-item schema:
 1. Paste the new `Code.gs` and save.
 2. Run `upgradeGroupedTiles` once. It adds and backfills tile/threshold columns without
    deleting rows. Existing items use `required_count=1`; existing claims are marked complete.
-3. Run `scrubLegacySensitiveData` if the sheet received pre-security-hardening claims.
-4. Replace both `token` and `admin_token` if that security scrub was needed.
-5. Give participants only the current player token.
-6. Delete the retired `account_hash` column from `Claims` if you no longer want the empty
+3. Confirm the `Attempts` tab now exists; `upgradeGroupedTiles` creates it. Until it does,
+   the backend still decides claims correctly but terminal rejections are not replayed, so a
+   retry after a lost response can return a different answer.
+4. Run `scrubLegacySensitiveData` if the sheet received pre-security-hardening claims.
+5. Replace both `token` and `admin_token` if that security scrub was needed.
+6. Give participants only the current player token.
+7. Delete the retired `account_hash` column from `Claims` if you no longer want the empty
    legacy column.
-7. Delete the `announce_from_backend` and `discord_webhook` rows from `Config` if they are
+8. Delete the `announce_from_backend` and `discord_webhook` rows from `Config` if they are
    present. The backend no longer reads either one, and leaving a live webhook URL sitting in
    the sheet is a credential you are not using. Rotate that webhook in Discord if it was ever
    populated. Players who relied on backend announcements need Dink configured instead; see
    [`SETUP.md`](../SETUP.md).
-8. Deploy a new web-app version and update players to the threshold-capable plugin build
+9. Deploy a new web-app version and update players to the threshold-capable plugin build
    together.
    The `/exec` URL stays the same.
+
+`Attempts` grows by at most one row per rejected drop, so it stays far smaller than `Claims`
+for a normal event. Clear its data rows (keep the header) when you reuse the sheet for another
+event; leaving them only risks an old claim id colliding with a new one.
 
 Before raising `required_count` on a previously used tile, verify the existing contribution
 rows represent distinct item ids and reconcile any legacy conflicts. Always keep the same
@@ -245,6 +270,8 @@ drive-by posts but not a determined participant. The `/exec` URL alone does not 
 board lookup or claim. The mitigations are visibility and reversibility:
 
 - `Audit` records operational claim/unclaim fields but allowlists out tokens and webhook URLs.
+- `Attempts` records terminal rejections against their claim id so retries are stable. It
+  holds the same class of operational fields and never a credential.
 - `Claims` records each distinct contribution's logical tile, actual item, normalized RSN,
   source, claim id, progress-after value, completion flag, and timestamp; it does not receive
   a RuneLite account hash.

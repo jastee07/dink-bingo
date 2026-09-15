@@ -20,6 +20,7 @@ var SHEET_TEAMS = 'Teams';
 var SHEET_CLAIMS = 'Claims';
 var SHEET_AUDIT = 'Audit';
 var SHEET_CONFIG = 'Config';
+var SHEET_ATTEMPTS = 'Attempts';
 var SHEET_LEADERBOARD = 'Leaderboard';
 
 // Stay below the RuneLite HTTP client's read timeout so callers can receive retryable=true.
@@ -175,6 +176,10 @@ function handleClaim(body) {
     // and let the organizer repair the row -- the client keeps retrying a generic error, so
     // the claim lands once the sheet is fixed.
     var claims = readClaims(catalog);
+    // Mutable state, so it is read here rather than hoisted above the lock with Items and
+    // Teams. The ledger holds only terminal rejections for the current event, so it stays
+    // small; the extra round trip buys a claim id whose answer cannot drift between retries.
+    var attempts = readAttempts();
 
     // Idempotency first: a retried POST must return the original outcome rather
     // than being treated as a fresh attempt.
@@ -194,10 +199,30 @@ function handleClaim(body) {
           catalog
         ));
       }
+
+      // Accepted claims take precedence: Claims is the authoritative record and a row there
+      // means the contribution really happened. Only if nothing was accepted does a recorded
+      // terminal rejection replay.
+      var priorAttempt = attempts && attempts[body.claimId];
+      if (priorAttempt) {
+        // A claim id names one operation. Reusing it for a different player or item is a
+        // client bug or a forged request, and replaying the stored answer would report
+        // someone else's outcome, so fail closed instead.
+        if (priorAttempt.rsn !== rsn || priorAttempt.itemId !== itemId) {
+          auditLocked(rsn, itemId, 'bad_request', body, 'claim_id reused for a different rsn or item');
+          return json({ status: 'error', error: 'claim_id_conflict' });
+        }
+        // Deliberately no announcement and no new Audit row: this outcome was already
+        // decided and recorded, and the client does not announce a rejection anyway.
+        return json(attemptReplay(priorAttempt, claims, catalog));
+      }
     }
 
     if (!eventOpen(cfg)) {
       auditLocked(rsn, itemId, 'event_closed', body, '');
+      recordAttempt(attempts, body.claimId, {
+        rsn: rsn, itemId: itemId, status: 'event_closed'
+      });
       return json({ status: 'event_closed' });
     }
 
@@ -207,12 +232,19 @@ function handleClaim(body) {
     var team = member ? member.team : null;
     if (!team) {
       auditLocked(rsn, itemId, 'not_on_team', body, '');
+      recordAttempt(attempts, body.claimId, {
+        rsn: rsn, itemId: itemId, status: 'not_on_team'
+      });
       return json({ status: 'not_on_team' });
     }
 
     var tile = catalog.byItemId[itemId];
     if (!tile) {
       auditLocked(rsn, itemId, 'not_on_board', body, '');
+      recordAttempt(attempts, body.claimId, {
+        rsn: rsn, team: team, itemId: itemId, status: 'not_on_board',
+        itemName: body.itemName
+      });
       return json({ status: 'not_on_board' });
     }
     body.tileId = tile.id;
@@ -226,6 +258,10 @@ function handleClaim(body) {
         'duplicate', false, team, tile, completion, state, claims, catalog
       );
       completedDuplicate.duplicateReason = 'tile_complete';
+      recordAttempt(attempts, body.claimId, {
+        rsn: rsn, team: team, itemId: itemId, status: 'duplicate',
+        tileId: tile.id, tileName: tile.name, itemName: item.name, complete: true
+      });
       return json(completedDuplicate);
     }
 
@@ -236,6 +272,10 @@ function handleClaim(body) {
         'duplicate', false, team, tile, existing, state, claims, catalog
       );
       itemDuplicate.duplicateReason = 'item_recorded';
+      recordAttempt(attempts, body.claimId, {
+        rsn: rsn, team: team, itemId: itemId, status: 'duplicate',
+        tileId: tile.id, tileName: tile.name, itemName: item.name, complete: false
+      });
       return json(itemDuplicate);
     }
 
@@ -497,6 +537,110 @@ function readClaims(catalog) {
     addContribution(claims, contribution);
   }
   return claims;
+}
+
+/**
+ * Read the terminal-rejection ledger, keyed by claim id.
+ *
+ * Accepted contributions are their own idempotency record: a retried claimId finds its row in
+ * Claims and replays. Terminal *rejections* went only to Audit, which is not consulted, so a
+ * retry after a lost HTTP response was re-evaluated against whatever the state had become. A
+ * drop rejected just before event_start could be accepted by its own retry a moment later; a
+ * drop evaluated before event_end could come back event_closed; a Teams or Items edit between
+ * attempts could flip not_on_team or not_on_board either way. A claimId is supposed to name
+ * one logical operation whose answer is stable.
+ *
+ * Returns null when the tab is absent, which is how a deployment that has not re-run
+ * setupSheet behaves. Claims keep working with the old semantics rather than every claim
+ * failing mid-event on a missing tab; backend/README.md makes creating it an upgrade step.
+ */
+function readAttempts() {
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_ATTEMPTS);
+  if (!sh) return null;
+  var values = sh.getDataRange().getValues();
+  var columns = headerMap(values[0] || []);
+  if (columns.claim_id == null || columns.status == null) return null;
+
+  var byClaimId = {};
+  for (var r = 1; r < values.length; r++) {
+    var claimId = String(values[r][columns.claim_id] || '').trim();
+    // First write wins. Two genuinely simultaneous retries can each append a row before
+    // either reads the other; they agree on the outcome, so the earlier row is authoritative.
+    if (!claimId || byClaimId[claimId]) continue;
+    byClaimId[claimId] = {
+      claimId: claimId,
+      rsn: String(values[r][columns.rsn] || '').trim(),
+      team: String(values[r][columns.team] || '').trim(),
+      itemId: parseInt(values[r][columns.item_id], 10),
+      status: String(values[r][columns.status] || '').trim(),
+      tileId: String(values[r][columns.tile_id] || '').trim(),
+      tileName: String(values[r][columns.tile_name] || ''),
+      itemName: String(values[r][columns.item_name] || ''),
+      complete: truthy(values[r][columns.complete])
+    };
+  }
+  return byClaimId;
+}
+
+/**
+ * Record a terminal rejection so its claim id replays the same answer.
+ *
+ * Never store the event token, admin token, or any other Config value here; the ledger holds
+ * only the operational fields needed to reproduce the original response.
+ */
+function recordAttempt(attempts, claimId, fields) {
+  if (attempts === null || !claimId || attempts[claimId]) return;
+  try {
+    sheet(SHEET_ATTEMPTS).appendRow([
+      claimId,
+      fields.rsn || '',
+      fields.team || '',
+      fields.itemId == null ? '' : fields.itemId,
+      fields.status,
+      fields.tileId || '',
+      fields.tileName || '',
+      fields.itemName || '',
+      !!fields.complete,
+      new Date()
+    ]);
+    attempts[claimId] = {
+      claimId: claimId,
+      rsn: fields.rsn || '',
+      team: fields.team || '',
+      itemId: fields.itemId,
+      status: fields.status,
+      tileId: fields.tileId || '',
+      tileName: fields.tileName || '',
+      itemName: fields.itemName || '',
+      complete: !!fields.complete
+    };
+  } catch (err) {
+    // A claim that was correctly decided must not fail because its ledger row could not be
+    // written. The cost is that this one claim id can still drift on a later retry.
+    console.error('attempt ledger write failed: ' + err);
+  }
+}
+
+/** Rebuild the original terminal response from its ledger row. */
+function attemptReplay(attempt, claims, catalog) {
+  var replayed = {
+    status: attempt.status,
+    replay: true,
+    team: attempt.team || null,
+    tileId: attempt.tileId || null,
+    tileName: attempt.tileName || null,
+    itemId: attempt.itemId,
+    itemName: attempt.itemName || null,
+    points: 0,
+    complete: attempt.complete
+  };
+  // Board totals are cheap to recompute and are the only fields whose freshness helps the
+  // player, so they reflect the board now rather than at the time of the rejection.
+  if (attempt.team) {
+    replayed.remaining = countRemaining(attempt.team, claims, catalog.tiles);
+    replayed.total = catalog.tiles.length;
+  }
+  return replayed;
 }
 
 /**
@@ -877,6 +1021,10 @@ function setupSheet() {
     'source', 'progress_after', 'completed_tile'
   ];
   tabs[SHEET_AUDIT] = ['ts', 'rsn', 'item_id', 'result', 'notes', 'raw_payload', 'tile_id'];
+  tabs[SHEET_ATTEMPTS] = [
+    'claim_id', 'rsn', 'team', 'item_id', 'status', 'tile_id', 'tile_name', 'item_name',
+    'complete', 'recorded_at'
+  ];
   tabs[SHEET_CONFIG] = ['key', 'value'];
 
   for (var name in tabs) {
@@ -1005,6 +1153,23 @@ function upgradeGroupedTiles() {
       auditSheet.getRange(1, auditValues[0].length + 1).setValue('tile_id');
     }
 
+    // Terminal-rejection ledger. Without it a retry after a lost response is re-evaluated
+    // against current state and can return a different answer for the same claim id.
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var attempts = ss.getSheetByName(SHEET_ATTEMPTS);
+    if (!attempts) attempts = ss.insertSheet(SHEET_ATTEMPTS);
+    if (attempts.getLastRow() === 0) {
+      var attemptHeaders = [
+        'claim_id', 'rsn', 'team', 'item_id', 'status', 'tile_id', 'tile_name', 'item_name',
+        'complete', 'recorded_at'
+      ];
+      attempts.appendRow(attemptHeaders);
+      attempts.setFrozenRows(1);
+      attempts.getRange(1, 1, 1, attemptHeaders.length).setFontWeight('bold');
+    }
+    // tile_id is a text identifier even when it looks like a number, as on Items and Claims.
+    attempts.getRange('F:F').setNumberFormat('@');
+
     SpreadsheetApp.flush();
     setupLeaderboard(sheet(SHEET_LEADERBOARD));
   } finally {
@@ -1012,6 +1177,7 @@ function upgradeGroupedTiles() {
   }
 
   SpreadsheetApp.getUi().alert(
+    'The Attempts ledger is ready. ' +
     'Grouped-tile threshold columns were added and existing rows remain one-of-one tiles. ' +
     'Assign the same tile_id, tile_name, points, and required_count to alternative Items rows, ' +
     'then deploy a new version.'
