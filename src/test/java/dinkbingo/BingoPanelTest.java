@@ -15,6 +15,7 @@ import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -133,6 +134,84 @@ class BingoPanelTest {
         assertEquals("Arcane prayer scroll", rowName(itemList.getComponent(0)));
         assertEquals("Twisted buckler", rowName(itemList.getComponent(1)));
         assertEquals("1 of 2 tiles left", statusText(panel));
+    }
+
+    @Test
+    void aRejectedTokenNamesTheSetupMistakeInsteadOfTheConnection() throws Exception {
+        BingoPanel panel = new BingoPanel(mock(ItemManager.class));
+
+        panel.renderLoadError("bad_token");
+        SwingUtilities.invokeAndWait(() -> {
+            // Flush the render queued by BingoPanel.renderLoadError.
+        });
+
+        assertEquals("Event token rejected. Check the token on the Config tab.",
+            statusText(panel));
+    }
+
+    @Test
+    void aTransportFailureStillAsksAboutTheConnection() throws Exception {
+        BingoPanel panel = new BingoPanel(mock(ItemManager.class));
+
+        panel.renderLoadError();
+        SwingUtilities.invokeAndWait(() -> {
+            // Flush the render queued by BingoPanel.renderLoadError.
+        });
+
+        assertEquals("Check your connection, then press Refresh", statusText(panel));
+    }
+
+    @Test
+    void knownBackendErrorsBecomeActionableText() {
+        assertEquals("Event token rejected. Check the token on the Config tab.",
+            BingoPanel.describeBackendError("bad_token"));
+        assertEquals("The backend is busy. Press Refresh to try again.",
+            BingoPanel.describeBackendError("lock_timeout"));
+        assertEquals("The backend rejected the request. Check the Apps Script deployment.",
+            BingoPanel.describeBackendError("bad_request"));
+        assertEquals("Check your connection, then press Refresh",
+            BingoPanel.describeBackendError(null));
+        assertEquals("Check your connection, then press Refresh",
+            BingoPanel.describeBackendError("   "));
+    }
+
+    /** Sheet and Config mistakes surface as free text thrown by the Apps Script. */
+    @Test
+    void anUnrecognizedBackendErrorIsShownButBounded() {
+        assertEquals("Backend error: Error: event_start must be before event_end",
+            BingoPanel.describeBackendError("Error: event_start must be before event_end"));
+
+        StringBuilder long_ = new StringBuilder();
+        for (int i = 0; i < 40; i++) {
+            long_.append("abcdefghij");
+        }
+        String bounded = BingoPanel.describeBackendError(long_.toString());
+        assertEquals("Backend error: " + long_.substring(0, 80) + "\u2026", bounded);
+    }
+
+    /**
+     * A custom backend controls the error field, and Swing renders a label as markup as soon
+     * as its text starts with an HTML tag.
+     */
+    @Test
+    void anUnrecognizedBackendErrorIsNeverRenderedAsMarkup() throws Exception {
+        String hostile = "<html><img src='http://tracker.example/x.png'>";
+        String described = BingoPanel.describeBackendError(hostile);
+        assertTrue(described.startsWith("Backend error: "), described);
+
+        BingoPanel panel = new BingoPanel(mock(ItemManager.class));
+        panel.renderLoadError(hostile);
+        SwingUtilities.invokeAndWait(() -> {
+            // Flush the render queued by BingoPanel.renderLoadError.
+        });
+        assertFalse(statusText(panel).toLowerCase(java.util.Locale.ROOT).startsWith("<html"));
+    }
+
+    /** A multi-line reason would otherwise leave the sidebar showing only its first word. */
+    @Test
+    void aMultiLineBackendErrorCollapsesToOneLine() {
+        assertEquals("Backend error: Error: invalid Items row 7",
+            BingoPanel.describeBackendError("Error:\n  invalid Items\trow 7\n"));
     }
 
     private static String rowName(Component component) {
