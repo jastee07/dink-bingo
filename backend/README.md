@@ -68,7 +68,7 @@ the `/exec` URL stays the same.
 | --- | --- | --- |
 | `GET` | `?action=ping` | Liveness check, no auth |
 | `POST` | body `{action:"board", token, rsn}` | The caller's team, remaining count, and every tile with its claim state |
-| `POST` | body `{token, rsn, itemId, itemName, quantity, source, claimId}` | Attempt a claim |
+| `POST` | body `{token, rsn, itemId, itemName, source, claimId}` | Attempt a claim |
 | `POST` | body `{action:"unclaim", admin_token, team, tile_id, item_id?}` | Admin undo for one contributed item, or the whole tile when `item_id` is omitted |
 
 Claim responses: `progress`, `claimed`, `duplicate`, `not_on_board`, `not_on_team`,
@@ -137,27 +137,27 @@ For the 2-of-3 Abyssal dye example above, first contribution (expect
 `"status":"progress","progress":1,"required":2`):
 
 ```bash
-curl -sL -X POST "$URL" -H 'Content-Type: application/json' -d '{"token":"'"$TOKEN"'","rsn":"Jake","itemId":26809,"itemName":"Abyssal blue dye","quantity":1,"source":"Guardians of the Rift","claimId":"test-claim-001"}'
+curl -sL -X POST "$URL" -H 'Content-Type: application/json' -d '{"token":"'"$TOKEN"'","rsn":"Jake","itemId":26809,"itemName":"Abyssal blue dye","source":"Guardians of the Rift","claimId":"test-claim-001"}'
 ```
 
 Idempotent replay — same `claimId`, expect `"status":"progress","replay":true` and **no new
 `Claims` row**:
 
 ```bash
-curl -sL -X POST "$URL" -H 'Content-Type: application/json' -d '{"token":"'"$TOKEN"'","rsn":"Jake","itemId":26809,"itemName":"Abyssal blue dye","quantity":1,"source":"Guardians of the Rift","claimId":"test-claim-001"}'
+curl -sL -X POST "$URL" -H 'Content-Type: application/json' -d '{"token":"'"$TOKEN"'","rsn":"Jake","itemId":26809,"itemName":"Abyssal blue dye","source":"Guardians of the Rift","claimId":"test-claim-001"}'
 ```
 
 Same-item duplicate — new `claimId`, expect `"status":"duplicate"` and progress still 1/2:
 
 ```bash
-curl -sL -X POST "$URL" -H 'Content-Type: application/json' -d '{"token":"'"$TOKEN"'","rsn":"Jake","itemId":26809,"itemName":"Abyssal blue dye","quantity":1,"source":"Guardians of the Rift","claimId":"test-claim-002"}'
+curl -sL -X POST "$URL" -H 'Content-Type: application/json' -d '{"token":"'"$TOKEN"'","rsn":"Jake","itemId":26809,"itemName":"Abyssal blue dye","source":"Guardians of the Rift","claimId":"test-claim-002"}'
 ```
 
 Second distinct contribution (expect `"status":"claimed","progress":2,"required":2` and points
 now awarded):
 
 ```bash
-curl -sL -X POST "$URL" -H 'Content-Type: application/json' -d '{"token":"'"$TOKEN"'","rsn":"Jake","itemId":26811,"itemName":"Abyssal red dye","quantity":1,"source":"Guardians of the Rift","claimId":"test-claim-003"}'
+curl -sL -X POST "$URL" -H 'Content-Type: application/json' -d '{"token":"'"$TOKEN"'","rsn":"Jake","itemId":26811,"itemName":"Abyssal red dye","source":"Guardians of the Rift","claimId":"test-claim-003"}'
 ```
 
 After completion, green dye is a tile-complete duplicate. The `Claims` tab should contain

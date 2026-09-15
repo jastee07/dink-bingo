@@ -182,7 +182,7 @@ alone does not authorize board access or claims. It stops drive-by posts but not
 participant. The mitigations are visibility and reversibility:
 
 - Board lookup sends the player's RSN and event token to the organizer's Apps Script.
-- Contributions additionally send item id/name, quantity, loot source, and a random claim id.
+- Contributions additionally send item id/name, loot source, and a random claim id.
 - No RuneLite account hash is collected.
 - `Audit` stores only allowlisted operational fields; tokens and webhook URLs are redacted.
 - `admin_token` is organizer-only and enables item-level or whole-tile unclaim.

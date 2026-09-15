@@ -78,8 +78,16 @@ class BingoDetectorTest {
         assertEquals("Abyssal whip", claim.getItemName());
         assertEquals("Jake", claim.getRsn());
         assertEquals("Abyssal demon", claim.getSource());
-        assertEquals(1, claim.getQuantity());
         assertNotNull(claim.getClaimId(), "a claimId is required for backend idempotency");
+    }
+
+    @Test
+    void submitsOneClaimForAStackedDropRegardlessOfSize() {
+        detector.onLoot(loot(WHIP, 20), "Abyssal demon");
+
+        ClaimRequest claim = captureClaim();
+        assertEquals(WHIP, claim.getItemId());
+        verify(bingoClient, times(1)).submitClaim(any());
     }
 
     @Test

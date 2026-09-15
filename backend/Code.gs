@@ -10,7 +10,7 @@
  *   GET  ?action=ping
  *   POST {action: "board", token, rsn}
  *   POST {action: "unclaim", admin_token, team, tile_id}
- *   POST {token, rsn, itemId, itemName, quantity, source, claimId}
+ *   POST {token, rsn, itemId, itemName, source, claimId}
  *
  * Run `setupSheet()` once from the editor to create the tabs.
  */
@@ -625,7 +625,7 @@ function auditLocked(rsn, itemId, result, payload, notes) {
  */
 function sanitizeAuditPayload(payload) {
   var input = payload || {};
-  var allowed = ['action', 'rsn', 'itemId', 'itemName', 'quantity', 'source', 'claimId',
+  var allowed = ['action', 'rsn', 'itemId', 'itemName', 'source', 'claimId',
     'team', 'tileId', 'tile_id', 'item_id'];
   var safe = {};
   for (var i = 0; i < allowed.length; i++) {

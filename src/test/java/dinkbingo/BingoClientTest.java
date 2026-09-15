@@ -245,6 +245,7 @@ class BingoClientTest {
         assertEquals("claim-abc", body.get("claimId").getAsString());
         assertEquals("Jake", body.get("rsn").getAsString());
         assertFalse(body.has("accountHash"), "account hashes must not leave the client");
+        assertFalse(body.has("quantity"), "stack size is not part of the claim contract");
     }
 
     @Test
@@ -425,7 +426,6 @@ class BingoClientTest {
         claim.setRsn("Jake");
         claim.setItemId(4151);
         claim.setItemName("Abyssal whip");
-        claim.setQuantity(1);
         claim.setSource("Abyssal demon");
         claim.setClaimId("claim-abc");
         return claim;

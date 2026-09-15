@@ -133,8 +133,11 @@ function assertBalancedFormula(cell) {
   assert.strictEqual(depth, 0, `${cell} has unbalanced parentheses: ${formula}`);
 }
 
+// quantity is no longer part of the claim contract; an older client still sending it must not
+// have it written into the Audit tab's raw_payload blob.
 const sanitized = context.sanitizeAuditPayload({
   action: "unclaim",
+  quantity: 20,
   token: "participant-secret",
   admin_token: "organizer-secret",
   discord_webhook: "https://discord.invalid/webhook",
@@ -206,7 +209,6 @@ const first = output(context.handleClaim({
   rsn: "Jake",
   itemId: 4151,
   itemName: "Abyssal whip",
-  quantity: 1,
   source: "Abyssal demon",
   claimId: "group-claim-1"
 }));
@@ -370,7 +372,6 @@ const blueDye = output(context.handleClaim({
   rsn: "Jake",
   itemId: 26809,
   itemName: "Abyssal blue dye",
-  quantity: 20,
   claimId: "dye-claim-1"
 }));
 assert.strictEqual(blueDye.status, "progress");
@@ -474,7 +475,6 @@ const threeOfFiveStatuses = [30001, 30002, 30003].map((itemId, index) =>
     rsn: "Jake",
     itemId,
     itemName: `Option ${index + 1}`,
-    quantity: 1,
     claimId: `five-way-${index + 1}`
   }))
 );
@@ -494,7 +494,6 @@ const fourthOfCompletedTile = output(context.handleClaim({
   rsn: "Jake",
   itemId: 30004,
   itemName: "Option four",
-  quantity: 1,
   claimId: "five-way-4"
 }));
 assert.strictEqual(fourthOfCompletedTile.status, "duplicate");

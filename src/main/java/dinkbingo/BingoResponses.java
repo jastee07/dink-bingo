@@ -86,7 +86,6 @@ public class BingoResponses {
         String rsn;
         int itemId;
         String itemName;
-        int quantity;
         String source;
         String claimId;
     }
