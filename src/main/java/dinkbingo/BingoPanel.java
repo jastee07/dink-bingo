@@ -23,9 +23,15 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.FormatStyle;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.StringJoiner;
 
@@ -45,6 +51,44 @@ public class BingoPanel extends PluginPanel {
 
     private final JLabel headerLabel = new JLabel();
     private final JLabel statusLabel = new JLabel();
+    private final JLabel freshnessLabel = new JLabel();
+
+    /**
+     * How current the rows on screen are.
+     * <p>
+     * Owned by the panel rather than recomputed per render, so re-drawing for an unrelated
+     * reason -- switching board view, toggling hidden tiles -- cannot make a board look
+     * freshly fetched when nothing was fetched.
+     */
+    private volatile Freshness freshness = Freshness.UNKNOWN;
+
+    /** When the last lifecycle-current board actually arrived; null until one has. */
+    @Nullable
+    private volatile Instant lastSuccess;
+
+    /** Non-null only while the backend has explicitly refused a refresh. */
+    @Nullable
+    private volatile String staleReason;
+
+    /**
+     * Whether the tile rows are on screen at all. A loading or error screen has no rows, so
+     * there is nothing for a freshness line to describe.
+     */
+    private volatile boolean showingBoard;
+
+    /** Overridden in tests so the rendered time does not depend on the wall clock. */
+    private Clock clock = Clock.systemDefaultZone();
+
+    /**
+     * Built once. The label is re-rendered on every refresh, so formatting must not allocate a
+     * formatter each time, and the player's own locale and zone decide how the time reads.
+     */
+    private final DateTimeFormatter timeFormat = DateTimeFormatter
+        .ofLocalizedTime(FormatStyle.SHORT)
+        .withLocale(Locale.getDefault())
+        .withZone(ZoneId.systemDefault());
+
+    private enum Freshness { UNKNOWN, REFRESHING, UPDATED, FAILED, REJECTED }
     private final JPanel itemsPanel = new JPanel();
     private final JScrollPane itemsScrollPane = new JScrollPane(
         itemsPanel,
@@ -77,8 +121,13 @@ public class BingoPanel extends PluginPanel {
         JPanel titles = new JPanel();
         titles.setLayout(new BoxLayout(titles, BoxLayout.Y_AXIS));
         titles.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        freshnessLabel.setFont(FontManager.getRunescapeSmallFont());
+        freshnessLabel.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+        freshnessLabel.setVisible(false);
+
         titles.add(headerLabel);
         titles.add(statusLabel);
+        titles.add(freshnessLabel);
 
         refreshButton.setFocusPainted(false);
         refreshButton.addActionListener(e -> refreshHandler.run());
@@ -108,8 +157,55 @@ public class BingoPanel extends PluginPanel {
         BoardView boardView,
         boolean hideCompletedTiles
     ) {
+        showingBoard = configured && board.isConfigured();
         SwingUtilities.invokeLater(() ->
-            renderOnEdt(board, configured, boardView, hideCompletedTiles, null));
+            renderOnEdt(board, configured, boardView, hideCompletedTiles));
+    }
+
+    /**
+     * A lifecycle-current board arrived. Safe to call from any thread.
+     * <p>
+     * Separate from {@link #render} on purpose: the board is also re-rendered when the player
+     * switches view or toggles hidden tiles, and stamping those as a refresh would tell them
+     * the board is current when nothing was fetched.
+     */
+    public void markRefreshSucceeded() {
+        lastSuccess = clock.instant();
+        staleReason = null;
+        freshness = Freshness.UPDATED;
+        SwingUtilities.invokeLater(this::updateFreshnessLabel);
+    }
+
+    /**
+     * A refresh is under way. Safe to call from any thread.
+     * <p>
+     * Deliberately touches only the freshness line. Blanking the rows here is what made a
+     * periodic refresh flicker the whole board, and it throws away something readable in
+     * exchange for nothing.
+     */
+    public void markRefreshing() {
+        freshness = Freshness.REFRESHING;
+        SwingUtilities.invokeLater(this::updateFreshnessLabel);
+    }
+
+    /**
+     * The round trip failed and the rows on screen are the last good board. Safe to call from
+     * any thread.
+     * <p>
+     * Distinct from a rejection: the board is probably still correct, so it keeps its last
+     * success time and claims keep being submitted.
+     */
+    public void markRefreshFailed() {
+        freshness = Freshness.FAILED;
+        SwingUtilities.invokeLater(this::updateFreshnessLabel);
+    }
+
+    /** Forget how fresh anything was, for logout, a token change, or shutdown. */
+    public void resetFreshness() {
+        lastSuccess = null;
+        staleReason = null;
+        freshness = Freshness.UNKNOWN;
+        SwingUtilities.invokeLater(this::updateFreshnessLabel);
     }
 
     /**
@@ -128,13 +224,16 @@ public class BingoPanel extends PluginPanel {
         boolean hideCompletedTiles,
         @Nullable String backendError
     ) {
-        String reason = BingoErrors.describeBoardError(backendError);
+        staleReason = BingoErrors.describeBoardError(backendError);
+        freshness = Freshness.REJECTED;
+        showingBoard = configured && board.isConfigured();
         SwingUtilities.invokeLater(() ->
-            renderOnEdt(board, configured, boardView, hideCompletedTiles, reason));
+            renderOnEdt(board, configured, boardView, hideCompletedTiles));
     }
 
     /** Safe to call from any thread. */
     public void renderLoading() {
+        showingBoard = false;
         SwingUtilities.invokeLater(() -> renderMessage(
             "Loading board",
             "Fetching your team's tiles\u2026"
@@ -148,6 +247,7 @@ public class BingoPanel extends PluginPanel {
      * connection actually explains.
      */
     public void renderLoadError() {
+        showingBoard = false;
         SwingUtilities.invokeLater(() -> renderMessage(
             "Couldn't load board",
             "Check your connection, then press Refresh"
@@ -161,6 +261,7 @@ public class BingoPanel extends PluginPanel {
      */
     public void renderLoadError(String backendError) {
         String reason = describeBackendError(backendError);
+        showingBoard = false;
         SwingUtilities.invokeLater(() -> renderMessage("Couldn't load board", reason));
     }
 
@@ -178,8 +279,7 @@ public class BingoPanel extends PluginPanel {
         BingoBoard board,
         boolean configured,
         BoardView boardView,
-        boolean hideCompletedTiles,
-        @Nullable String staleReason
+        boolean hideCompletedTiles
     ) {
         SwingUtil.fastRemoveAll(itemsPanel);
 
@@ -187,6 +287,7 @@ public class BingoPanel extends PluginPanel {
             headerLabel.setText("Not configured");
             statusLabel.setForeground(LIVE_STATUS_COLOR);
             statusLabel.setText("Set a Backend URL in the config");
+            freshnessLabel.setVisible(false);
             refreshItemsPanel();
             return;
         }
@@ -195,6 +296,7 @@ public class BingoPanel extends PluginPanel {
             headerLabel.setText("No team");
             statusLabel.setForeground(LIVE_STATUS_COLOR);
             statusLabel.setText("Your RSN is not on the Teams tab");
+            freshnessLabel.setVisible(false);
             refreshItemsPanel();
             return;
         }
@@ -211,6 +313,7 @@ public class BingoPanel extends PluginPanel {
             // string cannot be read as Swing markup or push the tile count off screen.
             statusLabel.setText("Not claiming drops \u2014 " + staleReason);
         }
+        updateFreshnessLabel();
 
         GridBagConstraints c = new GridBagConstraints();
         c.fill = GridBagConstraints.HORIZONTAL;
@@ -262,7 +365,66 @@ public class BingoPanel extends PluginPanel {
         headerLabel.setText(header);
         statusLabel.setForeground(LIVE_STATUS_COLOR);
         statusLabel.setText(status);
+        // There are no rows on screen, so there is nothing for a freshness line to describe.
+        freshnessLabel.setVisible(false);
         refreshItemsPanel();
+    }
+
+    /**
+     * Describe how current the rows are, in the player's own locale and time zone.
+     * <p>
+     * Always an absolute time rather than "just now". Nothing ticks this label, so a relative
+     * phrase would still read "just now" twenty minutes later, which is worse than no
+     * indicator at all during an event.
+     */
+    private void updateFreshnessLabel() {
+        String text = freshnessText();
+        freshnessLabel.setText(text);
+        freshnessLabel.setVisible(!text.isEmpty());
+    }
+
+    /**
+     * The freshness line exactly as a player reads it, derived from the panel's own state.
+     * <p>
+     * Deliberately not read back out of the label. Swing fields are owned by the EDT, so
+     * reading them from anywhere else sees whatever was published last, which made this
+     * untestable and would make any future caller subtly wrong.
+     */
+    String freshnessText() {
+        if (!showingBoard) {
+            return "";
+        }
+        String text;
+        switch (freshness) {
+            case REFRESHING:
+                text = "Refreshing\u2026";
+                break;
+            case UPDATED:
+                text = "Updated " + formatLastSuccess();
+                break;
+            case FAILED:
+                text = lastSuccess == null ? "Refresh failed"
+                    : "Last updated " + formatLastSuccess() + " \u2014 refresh failed";
+                break;
+            case REJECTED:
+                // The status line above already carries the reason and the warning, so this
+                // only has to say how old the rows are.
+                text = lastSuccess == null ? "" : "Last updated " + formatLastSuccess();
+                break;
+            default:
+                text = "";
+                break;
+        }
+        return text;
+    }
+
+    private String formatLastSuccess() {
+        return lastSuccess == null ? "never" : timeFormat.format(lastSuccess);
+    }
+
+    /** Test seam so a rendered time does not depend on the wall clock. */
+    void setClock(Clock clock) {
+        this.clock = clock;
     }
 
     private void refreshItemsPanel() {

@@ -156,7 +156,12 @@ public class BingoPlugin extends Plugin {
         });
         detector.setClaimListener((response, source) -> {
         });
+        detector.setClaimUnresolvedListener(itemName -> {
+        });
         detector.reset();
+        // The panel outlives a plugin restart, so a timestamp left behind would describe a
+        // board from the previous run.
+        panel.resetFreshness();
     }
 
     // ------------------------------------------------------------------
@@ -192,6 +197,7 @@ public class BingoPlugin extends Plugin {
             currentBoard = BingoBoard.EMPTY;
             boardLoaded = false;
             detector.reset();
+            panel.resetFreshness();
             renderBoard(BingoBoard.EMPTY, false);
             return;
         }
@@ -212,6 +218,7 @@ public class BingoPlugin extends Plugin {
             inFlightRefresh = fetchRefresh;
         }
 
+        panel.markRefreshing();
         bingoClient.fetchBoard(rsn).whenComplete((result, error) ->
             finishRefresh(lifecycle, fetchRefresh, result, error));
     }
@@ -236,6 +243,9 @@ public class BingoPlugin extends Plugin {
                 boardLoaded = true;
                 // Re-enables detection if an earlier refusal suspended it.
                 detector.setBoard(board);
+                // Only reached for a lifecycle-current refresh, so a stale completion from an
+                // older request can never move the timestamp forward.
+                panel.markRefreshSucceeded();
                 renderBoard(board, true);
             } else {
                 // A reason only exists when the backend answered and refused. Everything
@@ -255,11 +265,14 @@ public class BingoPlugin extends Plugin {
                     } else {
                         panel.renderLoadError(backendError);
                     }
-                } else if (!boardLoaded) {
+                } else if (boardLoaded) {
+                    // The rows stay exactly as they are -- the board is probably still correct
+                    // and the next drop may well get through -- but they are no longer
+                    // confirmed current, and saying so is the whole point.
+                    panel.markRefreshFailed();
+                } else {
                     panel.renderLoadError();
                 }
-                // A transport failure with a board already loaded is left alone on purpose:
-                // the board is probably still correct and the next drop may well get through.
             }
         }
         if (rerun && active) {
@@ -281,6 +294,7 @@ public class BingoPlugin extends Plugin {
             currentBoard = BingoBoard.EMPTY;
             boardLoaded = false;
             detector.reset();
+            panel.resetFreshness();
             if (bingoClient.isConfigured()) {
                 panel.renderLoading();
             }
@@ -299,6 +313,7 @@ public class BingoPlugin extends Plugin {
             currentBoard = BingoBoard.EMPTY;
             boardLoaded = false;
             detector.reset();
+            panel.resetFreshness();
             if (bingoClient.isConfigured()) {
                 panel.renderLoading();
             }
