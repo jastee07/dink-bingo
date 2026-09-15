@@ -16,6 +16,8 @@ import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
 import java.io.IOException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -246,6 +248,32 @@ class BingoClientTest {
         when(config.backendUrl()).thenReturn("");
         assertEquals(BingoBoard.EMPTY.getTiles(), client.fetchBoard("Jake").get(5, TimeUnit.SECONDS).getTiles());
         assertEquals(0, server.getRequestCount());
+    }
+
+    /**
+     * RuneLite hands every plugin the same single-threaded scheduler, so a request that waited
+     * on it would stall every other plugin's scheduled work for the length of the round trip,
+     * up to ten seconds per attempt on OkHttp's default timeouts.
+     */
+    @Test
+    void doesNotHoldTheSharedSchedulerThreadWhileARequestIsInFlight() throws Exception {
+        ScheduledExecutorService shared = Executors.newSingleThreadScheduledExecutor();
+        BingoClient onSharedThread = new BingoClient(new OkHttpClient(), new Gson(), shared, config);
+        server.enqueue(json("{\"status\":\"claimed\",\"itemId\":4151,\"remaining\":1}")
+            .setHeadersDelay(3, TimeUnit.SECONDS));
+
+        try {
+            CompletableFuture<ClaimResponse> pending = onSharedThread.submitClaim(claim());
+
+            CountDownLatch otherPluginWork = new CountDownLatch(1);
+            shared.execute(otherPluginWork::countDown);
+
+            assertTrue(otherPluginWork.await(2, TimeUnit.SECONDS),
+                "work queued behind an in-flight bingo request must not wait for the response");
+            assertTrue(pending.get(15, TimeUnit.SECONDS).isClaimed());
+        } finally {
+            shared.shutdownNow();
+        }
     }
 
     /**

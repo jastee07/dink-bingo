@@ -10,6 +10,8 @@ import dinkbingo.BingoResponses.BoardTile;
 import dinkbingo.BingoResponses.ClaimRequest;
 import dinkbingo.BingoResponses.ClaimResponse;
 import lombok.extern.slf4j.Slf4j;
+import okhttp3.Call;
+import okhttp3.Callback;
 import okhttp3.HttpUrl;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -31,9 +33,11 @@ import java.util.concurrent.TimeUnit;
 /**
  * Talks to the Apps Script backend.
  * <p>
- * Every call runs on the injected executor and never on the client thread. Retries reuse
- * the caller's {@code claimId}, which the backend treats as an idempotency key, so a retry
- * after a timeout can never produce a second claim.
+ * Every call is dispatched from the injected executor and never from the client thread, and
+ * the request itself is enqueued on OkHttp's dispatcher so no bingo request ever blocks a
+ * RuneLite thread while it waits. Retries reuse the caller's {@code claimId}, which the
+ * backend treats as an idempotency key, so a retry after a timeout can never produce a
+ * second claim.
  */
 @Slf4j
 @Singleton
@@ -159,51 +163,93 @@ public class BingoClient {
         return future;
     }
 
+    /**
+     * Enqueues one attempt. The executor hop keeps dispatch off the client thread and keeps a
+     * shutting-down executor from firing new requests, but it only enqueues: the round trip
+     * itself waits on OkHttp's dispatcher pool, so RuneLite's single shared scheduled thread is
+     * never held for the length of a request.
+     */
     private <T> void attempt(Request request, Class<T> type, int attemptNumber, CompletableFuture<T> future) {
         submit(future, () -> executor.execute(() -> {
             if (future.isDone()) {
                 return;
             }
-            try (Response response = httpClient.newCall(request).execute()) {
-                if (response.isSuccessful()) {
-                    ResponseBody body = response.body();
-                    String raw = body != null ? body.string() : "";
-                    try {
-                        T parsed = gson.fromJson(raw, type);
-                        if (isRetryable(parsed) && attemptNumber < MAX_ATTEMPTS) {
-                            retry(request, type, attemptNumber, future, "retryable backend response");
-                        } else {
-                            future.complete(parsed);
-                        }
-                    } catch (JsonSyntaxException e) {
-                        // Apps Script serves an HTML error page when the deployment is
-                        // misconfigured. Never log the response body because a custom backend
-                        // could reflect request credentials into it.
-                        log.warn("Bingo backend returned non-JSON (check the deployment is " +
-                            "'Execute as: Me' and 'Who has access: Anyone')");
-                        future.complete(null);
+            try {
+                httpClient.newCall(request).enqueue(new Callback() {
+                    @Override
+                    public void onFailure(Call call, IOException e) {
+                        failed(request, type, attemptNumber, future, e);
                     }
-                    return;
-                }
 
-                if (isRetryableHttp(response.code()) && attemptNumber < MAX_ATTEMPTS) {
-                    retry(request, type, attemptNumber, future, "HTTP " + response.code());
-                } else {
-                    log.warn("Bingo backend returned HTTP {}", response.code());
-                    future.complete(null);
-                }
-            } catch (IOException e) {
-                if (attemptNumber < MAX_ATTEMPTS) {
-                    retry(request, type, attemptNumber, future, e.toString());
-                } else {
-                    log.warn("Bingo backend unreachable after {} attempts", MAX_ATTEMPTS, e);
-                    future.complete(null);
-                }
+                    @Override
+                    public void onResponse(Call call, Response response) {
+                        handle(request, type, attemptNumber, future, response);
+                    }
+                });
             } catch (Exception e) {
                 log.warn("Unexpected failure talking to the bingo backend", e);
                 future.complete(null);
             }
         }));
+    }
+
+    /**
+     * Runs on OkHttp's dispatcher. Nothing here may throw: OkHttp only logs an exception raised
+     * by a callback, so an escaping failure would leave the future uncompleted and pin
+     * {@code BingoDetector}'s in-flight marker for the item.
+     */
+    private <T> void handle(Request request, Class<T> type, int attemptNumber,
+                            CompletableFuture<T> future, Response response) {
+        try (Response closing = response) {
+            if (closing.isSuccessful()) {
+                complete(request, type, attemptNumber, future, closing.body());
+                return;
+            }
+
+            if (isRetryableHttp(closing.code()) && attemptNumber < MAX_ATTEMPTS) {
+                retry(request, type, attemptNumber, future, "HTTP " + closing.code());
+            } else {
+                log.warn("Bingo backend returned HTTP {}", closing.code());
+                future.complete(null);
+            }
+        } catch (IOException e) {
+            // The response arrived but reading it failed part way through, which is the same
+            // kind of transport failure as never reaching the backend at all.
+            failed(request, type, attemptNumber, future, e);
+        } catch (Exception e) {
+            log.warn("Unexpected failure talking to the bingo backend", e);
+            future.complete(null);
+        }
+    }
+
+    private <T> void complete(Request request, Class<T> type, int attemptNumber,
+                              CompletableFuture<T> future, ResponseBody body) throws IOException {
+        String raw = body != null ? body.string() : "";
+        try {
+            T parsed = gson.fromJson(raw, type);
+            if (isRetryable(parsed) && attemptNumber < MAX_ATTEMPTS) {
+                retry(request, type, attemptNumber, future, "retryable backend response");
+            } else {
+                future.complete(parsed);
+            }
+        } catch (JsonSyntaxException e) {
+            // Apps Script serves an HTML error page when the deployment is misconfigured.
+            // Never log the response body because a custom backend could reflect request
+            // credentials into it.
+            log.warn("Bingo backend returned non-JSON (check the deployment is " +
+                "'Execute as: Me' and 'Who has access: Anyone')");
+            future.complete(null);
+        }
+    }
+
+    private <T> void failed(Request request, Class<T> type, int attemptNumber,
+                            CompletableFuture<T> future, IOException e) {
+        if (attemptNumber < MAX_ATTEMPTS) {
+            retry(request, type, attemptNumber, future, e.toString());
+        } else {
+            log.warn("Bingo backend unreachable after {} attempts", MAX_ATTEMPTS, e);
+            future.complete(null);
+        }
     }
 
     private static boolean isRetryable(Object response) {

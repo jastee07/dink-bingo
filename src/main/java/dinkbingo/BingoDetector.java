@@ -67,9 +67,10 @@ public class BingoDetector {
     private final AtomicLong generation = new AtomicLong();
 
     /**
-     * Invoked with the response and the loot source for every submitted claim, on the
-     * executor thread. The source is carried through rather than read from shared state,
-     * because another drop can land during the backend round trip.
+     * Invoked with the response and the loot source for every submitted claim, off the client
+     * thread and on whichever thread completed the request. The source is carried through
+     * rather than read from shared state, because another drop can land during the backend
+     * round trip.
      */
     private volatile BiConsumer<ClaimResponse, String> claimListener = (res, source) -> {
     };
