@@ -33,6 +33,9 @@ const sheets = {
 let lockDepth = 0;
 const sheetReadsUnderLock = [];
 
+// Rejected-auth diagnostics live here instead of the Audit tab; see noteRejectedAuth.
+const scriptCache = {};
+
 function fakeSheet(name) {
   return {
     getDataRange() {
@@ -89,6 +92,16 @@ const context = {
             held = false;
             lockDepth--;
           }
+        }
+      };
+    }
+  },
+  CacheService: {
+    getScriptCache() {
+      return {
+        get: key => (key in scriptCache ? scriptCache[key] : null),
+        put(key, value) {
+          scriptCache[key] = String(value);
         }
       };
     }
@@ -538,6 +551,93 @@ assert(
 assert(
   generatedFormula("E26").includes('progress&\"/\"&needed'),
   "the team matrix must display partial K-of-N progress"
+);
+
+// ---------------------------------------------------------------------------
+// Rejected authentication must not write to the authoritative spreadsheet (#35).
+//
+// The /exec deployment has to be public, so anyone who learns the URL can post invalid-token
+// requests forever without knowing the event token. Auditing each attempt would let that
+// traffic grow the sheet, burn write quota, and take the script lock away from real claims.
+// ---------------------------------------------------------------------------
+
+const auditRowsBeforeBadAuth = sheets.Audit.length;
+const claimRowsBeforeBadAuth = sheets.Claims.length;
+
+for (let attempt = 0; attempt < 25; attempt++) {
+  const rejected = output(context.handleClaim({
+    token: "not-the-event-token",
+    rsn: "Jake",
+    itemId: 4151,
+    itemName: "Abyssal whip",
+    claimId: "flood-" + attempt
+  }));
+  assert.strictEqual(rejected.error, "bad_token");
+}
+
+assert.strictEqual(
+  sheets.Audit.length,
+  auditRowsBeforeBadAuth,
+  "repeated invalid-token claims must not append Audit rows"
+);
+assert.strictEqual(
+  sheets.Claims.length,
+  claimRowsBeforeBadAuth,
+  "an invalid-token claim must not append a Claims row"
+);
+assert.strictEqual(lockDepth, 0, "a rejected claim must not leave the script lock held");
+
+const badBoard = output(context.handleBoard({token: "not-the-event-token", rsn: "Jake"}));
+assert.strictEqual(badBoard.error, "bad_token");
+
+const badAdmin = output(context.handleUnclaim({
+  admin_token: "not-the-admin-token",
+  team: "Team One",
+  tile_id: "rare-drop"
+}));
+assert.strictEqual(badAdmin.error, "bad_admin_token");
+assert.strictEqual(
+  sheets.Audit.length,
+  auditRowsBeforeBadAuth,
+  "invalid board and admin credentials must not append Audit rows either"
+);
+assert.strictEqual(
+  sheets.Claims.length,
+  claimRowsBeforeBadAuth,
+  "a rejected unclaim must not delete or add Claims rows"
+);
+
+// Visibility is retained out-of-band, bounded by a coarse time bucket rather than one record
+// per attempt, and never records the attempted credential.
+const rejectionKeys = Object.keys(scriptCache);
+assert.strictEqual(
+  rejectionKeys.length,
+  2,
+  "rejected-auth counters are bucketed, not one entry per attempt: " + rejectionKeys.join(", ")
+);
+const participantKey = rejectionKeys.find(key => key.includes("participant"));
+assert.strictEqual(
+  scriptCache[participantKey],
+  "26",
+  "every rejected participant-token attempt is counted in its bucket"
+);
+const cachedValues = rejectionKeys.join(" ") + " " + Object.values(scriptCache).join(" ");
+assert(
+  !cachedValues.includes("not-the-event-token") && !cachedValues.includes("not-the-admin-token"),
+  "the attempted credential must never be stored"
+);
+
+// A valid token with an unusable payload is authenticated traffic and stays auditable.
+const badRequest = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "",
+  itemId: "not-a-number"
+}));
+assert.strictEqual(badRequest.error, "bad_request");
+assert.strictEqual(
+  sheets.Audit.length,
+  auditRowsBeforeBadAuth + 1,
+  "authenticated rejections remain auditable"
 );
 
 console.log("Apps Script grouped-tile and security tests passed");

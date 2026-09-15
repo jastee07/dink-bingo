@@ -210,3 +210,30 @@ board lookup or claim. The mitigations are visibility and reversibility:
 - `admin_token` is organizer-only and enables item-level or whole-tile unclaim.
 - `discord_webhook` is read only by Apps Script when backend announcements are enabled and is
   never included in an API response or Audit row.
+
+### Unauthenticated traffic
+
+The deployment must be published as *Who has access: **Anyone***, because players authenticate
+with the event token in the request body rather than with a Google account. Anyone who learns
+the `/exec` URL can therefore send requests without knowing any token.
+
+Requests that fail authentication — a wrong `token` on a board or claim request, or a wrong
+`admin_token` on an unclaim — are rejected **without writing to the spreadsheet**. They append
+no `Audit` row, take no script lock, and leave `Claims` untouched. Otherwise a stranger with
+only the URL could grow the sheet, exhaust the daily write quota, and contend for the lock
+with real claims during a drop burst.
+
+Those attempts are still counted out-of-band, in a script cache keyed by a coarse time bucket
+that expires on its own, and one generic line per bucket is written to the Apps Script
+execution log. The attempted credential, the caller, and the request body are never recorded.
+Check **Executions** in the Apps Script editor if players report `bad_token`; a burst there
+usually means the distributed event token no longer matches `Config`.
+
+Authenticated rejections — `bad_request`, `event_closed`, `not_on_team`, `not_on_board`, and
+`duplicate` — are still fully audited, because they come from someone who already holds the
+event token and are the rejections an organizer actually needs to investigate.
+
+This is not rate limiting. Apps Script offers no way to throttle a public web app, so the
+remaining exposure is request volume against Google's own quotas for the deployment. Rotating
+`token` does not help, since these requests never present a valid one. If a URL is being
+abused, create a new deployment (which issues a new `/exec` URL) and redistribute it.

@@ -25,6 +25,11 @@ var SHEET_LEADERBOARD = 'Leaderboard';
 // Stay below the RuneLite HTTP client's read timeout so callers can receive retryable=true.
 var LOCK_TIMEOUT_MS = 5000;
 
+// Rejected-authentication diagnostics are bucketed by the hour and expire after six, so
+// invalid traffic cannot grow storage without bound. See noteRejectedAuth.
+var AUTH_REJECT_BUCKET_MS = 60 * 60 * 1000;
+var AUTH_REJECT_TTL_SECONDS = 6 * 60 * 60;
+
 // ---------------------------------------------------------------------------
 // Entry points
 // ---------------------------------------------------------------------------
@@ -75,6 +80,7 @@ function doPost(e) {
 function handleBoard(params) {
   var cfg = readConfig();
   if (!tokenValid(cfg, params.token)) {
+    noteRejectedAuth('participant token');
     return json({ status: 'error', error: 'bad_token' });
   }
 
@@ -124,7 +130,12 @@ function handleClaim(body) {
   var cfg = readConfig();
 
   if (!tokenValid(cfg, body.token)) {
-    audit(body.rsn, body.itemId, 'bad_token', body, '');
+    // Deliberately no Audit row. The deployment must be public, so anyone who learns the
+    // /exec URL can post invalid-token claims without knowing the event token. Auditing them
+    // would let unauthenticated traffic append rows to the authoritative spreadsheet, burn
+    // write quota, and -- because audit() takes the script lock -- contend with real claims
+    // during exactly the drop burst the lock exists to serialize.
+    noteRejectedAuth('participant token');
     return json({ status: 'error', error: 'bad_token' });
   }
 
@@ -278,6 +289,7 @@ function handleClaim(body) {
 function handleUnclaim(params) {
   var cfg = readConfig();
   if (!cfg.admin_token || params.admin_token !== cfg.admin_token) {
+    noteRejectedAuth('admin token');
     return json({ status: 'error', error: 'bad_admin_token' });
   }
 
@@ -583,6 +595,39 @@ function resolveTeam(rsn) {
     }
   }
   return null;
+}
+
+/**
+ * Count a rejected authentication attempt without touching the spreadsheet.
+ *
+ * The web app is deployed with "Anyone" access because players authenticate with the event
+ * token in the request body, not with a Google account. That means unauthenticated traffic is
+ * always reachable, so any per-attempt spreadsheet write is an amplifier: it grows the
+ * authoritative sheet, consumes Apps Script write quota, and contends for the script lock.
+ *
+ * Cache entries expire on their own and are keyed by a coarse time bucket, so this records at
+ * most a handful of values regardless of how much invalid traffic arrives. The attempted
+ * token, the request body, and the caller are deliberately never recorded.
+ */
+function noteRejectedAuth(kind) {
+  try {
+    var cache = CacheService.getScriptCache();
+    if (!cache) return;
+    var bucket = Math.floor(new Date().getTime() / AUTH_REJECT_BUCKET_MS);
+    var key = 'auth_reject_' + kind.replace(/[^a-z]+/gi, '_') + '_' + bucket;
+    var count = parseInt(cache.get(key), 10);
+    count = isNaN(count) ? 1 : count + 1;
+    cache.put(key, String(count), AUTH_REJECT_TTL_SECONDS);
+    if (count === 1) {
+      // One line per kind per bucket. Logging every attempt would just move the same
+      // unbounded-growth problem from the spreadsheet into the execution log.
+      console.warn('rejected an invalid ' + kind +
+        '; further attempts in this window are counted, not logged');
+    }
+  } catch (err) {
+    // Diagnostics must never break or slow a request.
+    console.error('auth rejection counter unavailable');
+  }
 }
 
 function audit(rsn, itemId, result, payload, notes) {
