@@ -13,6 +13,7 @@ import javax.inject.Singleton;
 import java.util.Collection;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
@@ -164,7 +165,19 @@ public class BingoDetector {
 
         log.debug("Submitting bingo claim for {} ({}) from {}", claim.getItemName(), itemId, source);
 
-        bingoClient.submitClaim(claim).whenComplete((response, error) -> {
+        CompletableFuture<ClaimResponse> pending;
+        try {
+            pending = bingoClient.submitClaim(claim);
+        } catch (RuntimeException e) {
+            // The client is expected to surface every failure as a completed future, but do not
+            // depend on that for the in-flight marker: a throw here would otherwise pin the item
+            // for the rest of the session and block every later drop of it.
+            inFlight.remove(itemId);
+            log.warn("Bingo claim for {} was not submitted", itemId, e);
+            return;
+        }
+
+        pending.whenComplete((response, error) -> {
             try {
                 if (claimGeneration != generation.get()) {
                     return; // plugin reset, logout, or configuration change while request was in flight

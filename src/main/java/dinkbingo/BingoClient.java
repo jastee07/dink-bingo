@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
@@ -159,7 +160,7 @@ public class BingoClient {
     }
 
     private <T> void attempt(Request request, Class<T> type, int attemptNumber, CompletableFuture<T> future) {
-        executor.execute(() -> {
+        submit(future, () -> executor.execute(() -> {
             if (future.isDone()) {
                 return;
             }
@@ -202,7 +203,7 @@ public class BingoClient {
                 log.warn("Unexpected failure talking to the bingo backend", e);
                 future.complete(null);
             }
-        });
+        }));
     }
 
     private static boolean isRetryable(Object response) {
@@ -216,10 +217,25 @@ public class BingoClient {
     private <T> void retry(Request request, Class<T> type, int attemptNumber, CompletableFuture<T> future, String cause) {
         long delay = BASE_BACKOFF_MS * (1L << (attemptNumber - 1));
         log.debug("Retrying bingo request in {}ms (attempt {} failed: {})", delay, attemptNumber, cause);
-        executor.schedule(
+        submit(future, () -> executor.schedule(
             () -> attempt(request, type, attemptNumber + 1, future),
             delay,
             TimeUnit.MILLISECONDS
-        );
+        ));
+    }
+
+    /**
+     * Hands work to the executor, completing the future with {@code null} if the executor is
+     * shutting down. Without this the rejection escapes {@code submitClaim} synchronously on
+     * the first attempt and is swallowed entirely on the retry path, and either way the future
+     * never completes, so {@code BingoDetector} never clears its in-flight marker for the item.
+     */
+    private <T> void submit(CompletableFuture<T> future, Runnable scheduling) {
+        try {
+            scheduling.run();
+        } catch (RejectedExecutionException e) {
+            log.debug("Bingo request dropped because the executor is shutting down");
+            future.complete(null);
+        }
     }
 }
