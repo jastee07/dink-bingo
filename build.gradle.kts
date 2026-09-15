@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     java
 }
@@ -48,7 +50,15 @@ dependencies {
 }
 
 group = "dinkbingo"
-version = "1.0.0"
+
+// The Plugin Hub reads runelite-plugin.properties, so that file is the single source of
+// truth for the version. Gradle mirrors it instead of declaring its own, which keeps a
+// release to one edited line and stops archive metadata from disagreeing with what ships.
+version = Properties().apply {
+    val pluginProperties = file("runelite-plugin.properties")
+    pluginProperties.inputStream().use { load(it) }
+}.getProperty("version")?.trim()?.takeIf { it.isNotEmpty() }
+    ?: error("runelite-plugin.properties must declare a non-empty version")
 
 tasks.withType<JavaCompile> {
     options.encoding = "UTF-8"
