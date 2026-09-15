@@ -95,7 +95,7 @@ class BingoPanelTest {
     }
 
     @Test
-    void possibleItemsShowsOnlyEligibleOptionsForUnfinishedTiles() throws Exception {
+    void possibleItemsStrikesOutEveryItemThatAlreadyCounted() throws Exception {
         ItemManager itemManager = mock(ItemManager.class);
         when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
         BingoPanel panel = new BingoPanel(itemManager);
@@ -130,94 +130,116 @@ class BingoPanelTest {
         BorderLayout layout = (BorderLayout) panel.getLayout();
         JScrollPane scrollPane = (JScrollPane) layout.getLayoutComponent(BorderLayout.CENTER);
         JPanel itemList = (JPanel) scrollPane.getViewport().getView();
-        assertEquals(2, itemList.getComponentCount());
-        assertEquals("Arcane prayer scroll", rowName(itemList.getComponent(0)));
-        assertEquals("Twisted buckler", rowName(itemList.getComponent(1)));
+        assertEquals(4, itemList.getComponentCount());
+        assertEquals("<html><s>Dexterous prayer scroll</s></html>",
+            rowName(itemList.getComponent(0)));
+        assertEquals("Arcane prayer scroll", rowName(itemList.getComponent(1)));
+        assertEquals("Twisted buckler", rowName(itemList.getComponent(2)));
+        assertEquals("<html><s>Completed item</s></html>", rowName(itemList.getComponent(3)));
         assertEquals("1 of 2 tiles left", statusText(panel));
     }
 
+    /**
+     * The setting reads as a board-wide one, so the item view has to answer to it the way the
+     * named-tile view does rather than hiding finished work unconditionally. With it on, the
+     * view is the pure hunting list: only what can still drop.
+     */
     @Test
-    void aRejectedTokenNamesTheSetupMistakeInsteadOfTheConnection() throws Exception {
-        BingoPanel panel = new BingoPanel(mock(ItemManager.class));
+    void possibleItemsDropsEveryFinishedItemWhenTheSettingIsOn() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
 
-        panel.renderLoadError("bad_token");
+        BingoTile unfinished = new BingoTile(
+            "raids",
+            "Any two raids uniques",
+            2,
+            2,
+            1,
+            java.util.Arrays.asList(
+                new BingoItem(1, "Dexterous prayer scroll"),
+                new BingoItem(2, "Arcane prayer scroll")
+            ),
+            Collections.singletonList(new BingoContribution(
+                1, "Dexterous prayer scroll", "Jake", null)),
+            false,
+            null,
+            null,
+            null
+        );
+        BingoTile completed = tile(4, "Completed item", true);
+
+        panel.render(new BingoBoard("Team One",
+                java.util.Arrays.asList(unfinished, completed), true),
+            true, BoardView.POSSIBLE_ITEMS, true);
         SwingUtilities.invokeAndWait(() -> {
-            // Flush the render queued by BingoPanel.renderLoadError.
+            // Flush the render queued by BingoPanel.render.
         });
 
-        assertEquals("Event token rejected. Check the token on the Config tab.",
-            statusText(panel));
-    }
-
-    @Test
-    void aTransportFailureStillAsksAboutTheConnection() throws Exception {
-        BingoPanel panel = new BingoPanel(mock(ItemManager.class));
-
-        panel.renderLoadError();
-        SwingUtilities.invokeAndWait(() -> {
-            // Flush the render queued by BingoPanel.renderLoadError.
-        });
-
-        assertEquals("Check your connection, then press Refresh", statusText(panel));
-    }
-
-    @Test
-    void knownBackendErrorsBecomeActionableText() {
-        assertEquals("Event token rejected. Check the token on the Config tab.",
-            BingoPanel.describeBackendError("bad_token"));
-        assertEquals("The backend is busy. Press Refresh to try again.",
-            BingoPanel.describeBackendError("lock_timeout"));
-        assertEquals("The backend rejected the request. Check the Apps Script deployment.",
-            BingoPanel.describeBackendError("bad_request"));
-        assertEquals("Check your connection, then press Refresh",
-            BingoPanel.describeBackendError(null));
-        assertEquals("Check your connection, then press Refresh",
-            BingoPanel.describeBackendError("   "));
-    }
-
-    /** Sheet and Config mistakes surface as free text thrown by the Apps Script. */
-    @Test
-    void anUnrecognizedBackendErrorIsShownButBounded() {
-        assertEquals("Backend error: Error: event_start must be before event_end",
-            BingoPanel.describeBackendError("Error: event_start must be before event_end"));
-
-        StringBuilder long_ = new StringBuilder();
-        for (int i = 0; i < 40; i++) {
-            long_.append("abcdefghij");
-        }
-        String bounded = BingoPanel.describeBackendError(long_.toString());
-        assertEquals("Backend error: " + long_.substring(0, 80) + "\u2026", bounded);
+        BorderLayout layout = (BorderLayout) panel.getLayout();
+        JScrollPane scrollPane = (JScrollPane) layout.getLayoutComponent(BorderLayout.CENTER);
+        JPanel itemList = (JPanel) scrollPane.getViewport().getView();
+        assertEquals(1, itemList.getComponentCount());
+        assertEquals("Arcane prayer scroll", rowName(itemList.getComponent(0)));
     }
 
     /**
-     * A custom backend controls the error field, and Swing renders a label as markup as soon
-     * as its text starts with an HTML tag.
+     * A credited item keeps its slot in the tile's option order rather than dropping out of
+     * the list, so a player can see that their drop registered.
      */
     @Test
-    void anUnrecognizedBackendErrorIsNeverRenderedAsMarkup() throws Exception {
-        String hostile = "<html><img src='http://tracker.example/x.png'>";
-        String described = BingoPanel.describeBackendError(hostile);
-        assertTrue(described.startsWith("Backend error: "), described);
+    void aCreditedItemKeepsItsPlaceStruckThroughWithItsContributor() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
 
-        BingoPanel panel = new BingoPanel(mock(ItemManager.class));
-        panel.renderLoadError(hostile);
+        BingoTile unfinished = new BingoTile(
+            "raids",
+            "Any two raids uniques",
+            2,
+            2,
+            1,
+            java.util.Arrays.asList(
+                new BingoItem(1, "Dexterous prayer scroll"),
+                new BingoItem(2, "Arcane prayer scroll"),
+                new BingoItem(3, "Twisted buckler")
+            ),
+            Collections.singletonList(new BingoContribution(
+                2, "Arcane prayer scroll", "Jake", null)),
+            false,
+            null,
+            null,
+            null
+        );
+
+        panel.render(new BingoBoard("Team One", Collections.singletonList(unfinished), true),
+            true, BoardView.POSSIBLE_ITEMS, false);
         SwingUtilities.invokeAndWait(() -> {
-            // Flush the render queued by BingoPanel.renderLoadError.
+            // Flush the render queued by BingoPanel.render.
         });
-        assertFalse(statusText(panel).toLowerCase(java.util.Locale.ROOT).startsWith("<html"));
-    }
 
-    /** A multi-line reason would otherwise leave the sidebar showing only its first word. */
-    @Test
-    void aMultiLineBackendErrorCollapsesToOneLine() {
-        assertEquals("Backend error: Error: invalid Items row 7",
-            BingoPanel.describeBackendError("Error:\n  invalid Items\trow 7\n"));
+        BorderLayout layout = (BorderLayout) panel.getLayout();
+        JScrollPane scrollPane = (JScrollPane) layout.getLayoutComponent(BorderLayout.CENTER);
+        JPanel itemList = (JPanel) scrollPane.getViewport().getView();
+        assertEquals(3, itemList.getComponentCount());
+        assertEquals("Dexterous prayer scroll", rowName(itemList.getComponent(0)));
+        assertEquals("<html><s>Arcane prayer scroll</s></html>",
+            rowName(itemList.getComponent(1)));
+        assertEquals("Twisted buckler", rowName(itemList.getComponent(2)));
+        // The tile itself is unclaimed, so the name can only come from the contribution.
+        assertEquals("Jake", rowEast(itemList.getComponent(1)));
     }
 
     private static String rowName(Component component) {
         JPanel row = (JPanel) component;
         return ((javax.swing.JLabel) ((BorderLayout) row.getLayout())
             .getLayoutComponent(BorderLayout.CENTER)).getText();
+    }
+
+    private static String rowEast(Component component) {
+        JPanel row = (JPanel) component;
+        return ((javax.swing.JLabel) ((BorderLayout) row.getLayout())
+            .getLayoutComponent(BorderLayout.EAST)).getText();
     }
 
     private static String statusText(BingoPanel panel) {
