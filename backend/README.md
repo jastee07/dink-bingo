@@ -87,10 +87,22 @@ Every mutating path holds `LockService.getScriptLock()`. A team/tile/item combin
 produce only one contribution row. Different accepted item ids can each advance a threshold
 tile until it completes; later contributions are duplicates.
 
+`Claims` is the only tab read while the lock is held. A claim reads `Items` and `Teams`
+before acquiring it, because a full sheet read is the slow part of the request and holding
+the lock across three of them lengthens the queue for every other claim in a burst. The
+checks that consume those reads still run inside the lock, in the same order as before.
+
+The script lock only serializes runs of this script. It has never prevented an organizer from
+editing a tab in the browser mid-claim, so reading `Items` and `Teams` a moment earlier does
+not change what an edit during a claim can do.
+
 The plugin generates a `claimId` (UUID) per detected drop and reuses it across retries.
 The backend checks `claimId` against existing claims *before* anything else, so a retried
 POST returns the original result with `"replay": true` rather than double-claiming or
-falsely reporting a duplicate.
+falsely reporting a duplicate. This ordering matters when a player is subbed out: a retry of
+a claim the Sheet already committed replays, rather than becoming `not_on_team` and losing
+the announcement for a drop that was genuinely recorded. New claims from a subbed-out player
+are rejected as normal.
 
 When the original HTTP response is lost after the Sheet committed the claim, that replay is
 the first successful response the client sees, so the running client sends one Dink request.

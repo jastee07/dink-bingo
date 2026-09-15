@@ -135,6 +135,22 @@ function handleClaim(body) {
     return json({ status: 'error', error: 'bad_request' });
   }
 
+  // Read Items and Teams before taking the lock. A full getDataRange() round trip is the slow
+  // part of any Apps Script call, and holding the global lock across three of them inflates
+  // the hold time for every claim -- precisely during the burst of simultaneous drops the
+  // lock exists to serialize. Claims is the mutable state and is still read under the lock.
+  //
+  // The script lock only serializes executions of this script; it never stopped an organizer
+  // from editing Teams or Items in the browser mid-claim. So hoisting these two reads widens
+  // an already-racy window by the duration of one read rather than introducing a new race.
+  //
+  // The checks that consume them stay inside the lock, after the claimId replay check. Teams
+  // does change during an event when a player is subbed out, and a retry of a claim the Sheet
+  // already committed must replay rather than turn into not_on_team: the client treats
+  // not_on_team as resolved, so it would stop retrying and never announce a real claim.
+  var catalog = readTiles();
+  var team = resolveTeam(rsn);
+
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
     // Caller retries with the same claimId, so refusing here is safe.
@@ -142,7 +158,6 @@ function handleClaim(body) {
   }
 
   try {
-    var catalog = readTiles();
     var claims = readClaims();
 
     // Idempotency first: a retried POST must return the original outcome rather
@@ -170,7 +185,6 @@ function handleClaim(body) {
       return json({ status: 'event_closed' });
     }
 
-    var team = resolveTeam(rsn);
     if (!team) {
       auditLocked(rsn, itemId, 'not_on_team', body, '');
       return json({ status: 'not_on_team' });
