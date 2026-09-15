@@ -37,6 +37,8 @@ public class BingoPanel extends PluginPanel {
 
     private static final Color CLAIMED_COLOR = new Color(0x7A, 0x7A, 0x7A);
     private static final Color OPEN_COLOR = Color.WHITE;
+    private static final Color STALE_COLOR = new Color(0xDB, 0x6E, 0x6E);
+    private static final Color LIVE_STATUS_COLOR = ColorScheme.LIGHT_GRAY_COLOR;
 
 
     private final ItemManager itemManager;
@@ -70,7 +72,7 @@ public class BingoPanel extends PluginPanel {
         headerLabel.setFont(FontManager.getRunescapeBoldFont());
         headerLabel.setForeground(Color.WHITE);
         statusLabel.setFont(FontManager.getRunescapeSmallFont());
-        statusLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+        statusLabel.setForeground(LIVE_STATUS_COLOR);
 
         JPanel titles = new JPanel();
         titles.setLayout(new BoxLayout(titles, BoxLayout.Y_AXIS));
@@ -107,7 +109,28 @@ public class BingoPanel extends PluginPanel {
         boolean hideCompletedTiles
     ) {
         SwingUtilities.invokeLater(() ->
-            renderOnEdt(board, configured, boardView, hideCompletedTiles));
+            renderOnEdt(board, configured, boardView, hideCompletedTiles, null));
+    }
+
+    /**
+     * Keep the last known board on screen, clearly labelled as no longer live. Safe to call
+     * from any thread.
+     * <p>
+     * Used when the backend answered and refused a refresh after an earlier one succeeded.
+     * The rows are still useful reference, but presenting them as current would hide the fact
+     * that the plugin has stopped claiming drops, which is exactly what a player needs to know
+     * when an organizer rotates the event token mid-event.
+     */
+    public void renderStale(
+        BingoBoard board,
+        boolean configured,
+        BoardView boardView,
+        boolean hideCompletedTiles,
+        @Nullable String backendError
+    ) {
+        String reason = BingoErrors.describeBoardError(backendError);
+        SwingUtilities.invokeLater(() ->
+            renderOnEdt(board, configured, boardView, hideCompletedTiles, reason));
     }
 
     /** Safe to call from any thread. */
@@ -155,12 +178,14 @@ public class BingoPanel extends PluginPanel {
         BingoBoard board,
         boolean configured,
         BoardView boardView,
-        boolean hideCompletedTiles
+        boolean hideCompletedTiles,
+        @Nullable String staleReason
     ) {
         SwingUtil.fastRemoveAll(itemsPanel);
 
         if (!configured) {
             headerLabel.setText("Not configured");
+            statusLabel.setForeground(LIVE_STATUS_COLOR);
             statusLabel.setText("Set a Backend URL in the config");
             refreshItemsPanel();
             return;
@@ -168,14 +193,24 @@ public class BingoPanel extends PluginPanel {
 
         if (!board.isConfigured()) {
             headerLabel.setText("No team");
+            statusLabel.setForeground(LIVE_STATUS_COLOR);
             statusLabel.setText("Your RSN is not on the Teams tab");
             refreshItemsPanel();
             return;
         }
 
-        headerLabel.setText(board.getTeam());
-        statusLabel.setText(board.getRemainingCount() + " of " + board.getTiles().size() + " tiles left"
-            + (board.isEventOpen() ? "" : " (event closed)"));
+        headerLabel.setText(staleReason == null
+            ? board.getTeam() : board.getTeam() + " \u2014 not live");
+        if (staleReason == null) {
+            statusLabel.setForeground(LIVE_STATUS_COLOR);
+            statusLabel.setText(board.getRemainingCount() + " of " + board.getTiles().size()
+                + " tiles left" + (board.isEventOpen() ? "" : " (event closed)"));
+        } else {
+            statusLabel.setForeground(STALE_COLOR);
+            // The reason is bounded and single-line, and never leads, so a backend-controlled
+            // string cannot be read as Swing markup or push the tile count off screen.
+            statusLabel.setText("Not claiming drops \u2014 " + staleReason);
+        }
 
         GridBagConstraints c = new GridBagConstraints();
         c.fill = GridBagConstraints.HORIZONTAL;
@@ -225,6 +260,7 @@ public class BingoPanel extends PluginPanel {
     private void renderMessage(String header, String status) {
         SwingUtil.fastRemoveAll(itemsPanel);
         headerLabel.setText(header);
+        statusLabel.setForeground(LIVE_STATUS_COLOR);
         statusLabel.setText(status);
         refreshItemsPanel();
     }

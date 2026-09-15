@@ -213,6 +213,7 @@ Grimy guam, say), kill something that drops it, and watch the tile close.
 | Panel says "Backend error: Teams row N ..." | That `Teams` row has an `rsn` with no `team`, or a `team` with no `rsn`. Fill it in or clear it. |
 | Panel says "Backend error: Teams rows N and M ..." | Two rows are the same player once case and `_`/space are normalized. Delete one. |
 | Panel says "Event token rejected" | The plugin's **Event Token** does not match `token` on the `Config` tab. |
+| Header says "— not live", status says "Not claiming drops" | The backend answered and refused the last refresh, so the rows on screen are the last good board and no drops are being submitted. Fix the named reason and press Refresh; a successful refresh clears it and resumes claiming. |
 | Panel says "Backend error: ..." | The backend refused the fetch and named the reason: a missing sheet tab, an `Items` row it cannot read, or a bad `event_start`/`event_end`. The full reason is in the client log. |
 | Panel says "Check your connection" | The request never reached the backend. This one really is network or URL. |
 | Nothing happens on a drop, no chat line | The item id on the board doesn't match the real drop, or **Chat message on claim** is off. Check `Audit`. A backend that cannot be reached now says so in chat. |

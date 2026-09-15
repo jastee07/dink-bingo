@@ -234,17 +234,32 @@ public class BingoPlugin extends Plugin {
                 BingoBoard board = result.getBoard();
                 currentBoard = board;
                 boardLoaded = true;
+                // Re-enables detection if an earlier refusal suspended it.
                 detector.setBoard(board);
                 renderBoard(board, true);
-            } else if (!boardLoaded) {
+            } else {
                 // A reason only exists when the backend answered and refused. Everything
                 // else really is a failed round trip, which is what the generic message says.
                 String backendError = result == null ? null : result.getBackendError();
-                if (backendError == null) {
+                if (backendError != null) {
+                    // An explicit refusal -- a rotated token, a redeployed script, a broken
+                    // sheet -- means the backend will not honour this client as it stands.
+                    // Keeping the old board on screen and still submitting drops against it
+                    // hides the reason behind a board that looks current and produces claims
+                    // that cannot succeed. Stop detecting and say so; the rows stay as
+                    // reference, labelled.
+                    detector.setDetectionEnabled(false);
+                    if (boardLoaded) {
+                        panel.renderStale(currentBoard, true, config.boardView(),
+                            config.hideCompletedTiles(), backendError);
+                    } else {
+                        panel.renderLoadError(backendError);
+                    }
+                } else if (!boardLoaded) {
                     panel.renderLoadError();
-                } else {
-                    panel.renderLoadError(backendError);
                 }
+                // A transport failure with a board already loaded is left alone on purpose:
+                // the board is probably still correct and the next drop may well get through.
             }
         }
         if (rerun && active) {

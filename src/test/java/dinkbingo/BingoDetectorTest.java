@@ -274,6 +274,38 @@ class BingoDetectorTest {
         assertTrue(unresolved.isEmpty());
     }
 
+    /**
+     * After the backend explicitly refuses a request, the board on screen is no longer one it
+     * will honour. Submitting against it only produces rejections the player cannot act on.
+     */
+    @Test
+    void suspendedDetectionSubmitsNothing() {
+        detector.setDetectionEnabled(false);
+
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+
+        verify(bingoClient, never()).submitClaim(any());
+    }
+
+    /** A board that loaded is proof the backend is answering this client again. */
+    @Test
+    void aFreshBoardResumesDetection() {
+        detector.setDetectionEnabled(false);
+        detector.setBoard(board(open(WHIP, "Abyssal whip")));
+
+        assertTrue(detector.isDetectionEnabled());
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+        verify(bingoClient, times(1)).submitClaim(any());
+    }
+
+    @Test
+    void resetResumesDetection() {
+        detector.setDetectionEnabled(false);
+        detector.reset();
+
+        assertTrue(detector.isDetectionEnabled());
+    }
+
     @Test
     void doesNotResubmitAfterBackendResolvesTheTile() {
         when(bingoClient.submitClaim(any()))
