@@ -24,9 +24,9 @@ import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 import java.util.StringJoiner;
 
 /**
@@ -230,18 +230,22 @@ public class BingoPanel extends PluginPanel {
                     if (hideCompletedTiles) {
                         continue;
                     }
-                    // Nothing on a completed tile can still drop, so its credited items are
-                    // struck through rather than listed as options.
                     for (BingoContribution credited : creditedContributions(tile)) {
                         itemsPanel.add(buildCreditedItemRow(tile, credited), c);
                         c.gridy++;
                     }
                     continue;
                 }
-                Set<Integer> creditedIds = creditedIds(tile);
+                Map<Integer, BingoContribution> credited = creditedById(tile);
                 for (BingoItem option : tile.getOptions()) {
-                    if (!creditedIds.contains(option.getId())) {
+                    BingoContribution counted = credited.get(option.getId());
+                    if (counted == null) {
                         itemsPanel.add(buildItemRow(tile, option), c);
+                        c.gridy++;
+                    } else if (!hideCompletedTiles) {
+                        // Keeping the row in place, struck through, is what tells a player
+                        // their drop was credited; dropping it just reshuffles the list.
+                        itemsPanel.add(buildCreditedItemRow(tile, counted), c);
                         c.gridy++;
                     }
                 }
@@ -278,11 +282,11 @@ public class BingoPanel extends PluginPanel {
 
         JLabel icon = new JLabel();
         icon.setPreferredSize(new Dimension(36, 32));
-        Set<Integer> creditedIds = creditedIds(tile);
+        Map<Integer, BingoContribution> creditedItems = creditedById(tile);
         BingoItem iconItem = tile.getClaimedItem();
         if (iconItem == null) {
             for (BingoItem option : tile.getOptions()) {
-                if (!creditedIds.contains(option.getId())) {
+                if (!creditedItems.containsKey(option.getId())) {
                     iconItem = option;
                     break;
                 }
@@ -312,7 +316,7 @@ public class BingoPanel extends PluginPanel {
             }
             StringJoiner missing = new StringJoiner(", ");
             for (BingoItem option : tile.getOptions()) {
-                if (!creditedIds.contains(option.getId())) missing.add(option.getName());
+                if (!creditedItems.containsKey(option.getId())) missing.add(option.getName());
             }
             name.setToolTipText((tile.getClaimedItems().isEmpty() ? "" :
                 "Credited: " + credited + ". ") + "Still eligible: " + missing);
@@ -368,7 +372,7 @@ public class BingoPanel extends PluginPanel {
     private static List<BingoContribution> creditedContributions(BingoTile tile) {
         List<BingoContribution> credited = new ArrayList<>(tile.getClaimedItems());
         BingoItem won = tile.getClaimedItem();
-        if (won != null && !creditedIds(tile).contains(won.getId())) {
+        if (won != null && !creditedById(tile).containsKey(won.getId())) {
             credited.add(new BingoContribution(
                 won.getId(), won.getName(), tile.getClaimedBy(), tile.getClaimedAt()));
         }
@@ -393,8 +397,10 @@ public class BingoPanel extends PluginPanel {
         // Strikethrough via HTML is the only way to get it on a plain JLabel.
         name.setText("<html><s>" + escape(credited.getName()) + "</s></html>");
         name.setForeground(CLAIMED_COLOR);
-        name.setToolTipText("Completed " + tile.getName()
-            + (claimedBy == null ? "" : ", credited to " + claimedBy));
+        name.setToolTipText((tile.isClaimed()
+            ? "Completed " + tile.getName()
+            : "Already counted toward " + tile.getName())
+            + (claimedBy == null ? "" : " by " + claimedBy));
         row.add(name, BorderLayout.CENTER);
 
         if (claimedBy != null) {
@@ -407,12 +413,12 @@ public class BingoPanel extends PluginPanel {
         return row;
     }
 
-    private static Set<Integer> creditedIds(BingoTile tile) {
-        Set<Integer> creditedIds = new HashSet<>();
+    private static Map<Integer, BingoContribution> creditedById(BingoTile tile) {
+        Map<Integer, BingoContribution> credited = new LinkedHashMap<>();
         for (BingoContribution contribution : tile.getClaimedItems()) {
-            creditedIds.add(contribution.getId());
+            credited.put(contribution.getId(), contribution);
         }
-        return creditedIds;
+        return credited;
     }
 
     private static String escape(String text) {

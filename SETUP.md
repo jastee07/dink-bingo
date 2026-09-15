@@ -125,7 +125,8 @@ Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
    Long tile lists scroll below the fixed team summary and Refresh button. "Not on a team"
    means your RSN isn't on the organizer's `Teams` tab. Set **Board View** to **Possible Items**
    to expand unfinished tiles into every item option your team can still contribute. Completed
-   tiles stay visible in both views, struck through, until you enable **Hide Completed Tiles**.
+   tiles, and items that already counted, stay visible struck through in both views until you
+   enable **Hide Completed Tiles**.
 
 Nothing else is needed. You don't pick your team, you don't enter item ids, and you don't have
 to remember to do anything when a drop lands.

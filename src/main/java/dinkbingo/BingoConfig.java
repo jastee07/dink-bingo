@@ -97,7 +97,7 @@ public interface BingoConfig extends Config {
     @ConfigItem(
         keyName = "hideCompletedTiles",
         name = "Hide Completed Tiles",
-        description = "Hide tiles your team has already completed, and their items, from the sidebar",
+        description = "Hide completed tiles, and items already credited, from the sidebar",
         position = 12,
         section = boardSection
     )
