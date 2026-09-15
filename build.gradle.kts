@@ -62,12 +62,9 @@ version = Properties().apply {
 
 tasks.withType<JavaCompile> {
     options.encoding = "UTF-8"
-    // --release rather than sourceCompatibility/targetCompatibility. Gradle 9 requires a
-    // JVM of 17 or later to run, so the compiler is now newer than the client's Java 11;
-    // bare source/target would emit Java 11 bytecode while still compiling against the
-    // newer JDK's class library, so a method added after 11 would link here and throw
-    // NoSuchMethodError on a real client. --release pins the API surface to 11 as well.
-    options.release.set(11)
+    val version = JavaVersion.VERSION_11.toString()
+    sourceCompatibility = version
+    targetCompatibility = version
 }
 
 tasks.test {

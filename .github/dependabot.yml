@@ -29,6 +29,13 @@ updates:
       # Held at 4.11.0 against the RuneLite client's own Mockito 3.1.0.
       - dependency-name: "org.mockito:mockito-core"
 
+      # Gradle 9 refuses to run on a JVM older than 17, but the Plugin Hub
+      # builds this plugin on Java 11, so the wrapper has to stay on 8.x. The
+      # 9.7.1 bump merged once and broke CI until it was reverted. Minor and
+      # patch 8.x updates are still wanted, so only major ones are ignored.
+      - dependency-name: "gradle-wrapper"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
