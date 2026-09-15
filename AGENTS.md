@@ -4,7 +4,8 @@
 
 Bingo with Dink Notifications is a Java 11 RuneLite Plugin Hub plugin. It detects bingo-board loot from
 RuneLite events, asks a deployed Google Apps Script to atomically claim the tile, and posts
-a `PluginMessage("dink", "notify", ...)` only when the backend returns `claimed`. Dink owns
+a `PluginMessage("dink", "notify", ...)` only when the backend accepts the claim, meaning it
+returns `claimed` for a completed tile or `progress` for a credited contribution. Dink owns
 the Discord webhook POST and screenshot capture.
 
 Do not turn this into a Dink fork or post directly to Discord from the plugin. Keeping the
@@ -79,7 +80,8 @@ without explicit authorization and a reversible test tile/team.
 
 ## Invariants to preserve
 
-- Announce only a `claimed` response; never announce `duplicate` or failures. A replay returned
+- Announce only an accepted outcome, meaning `claimed` or `progress`; never announce
+  `duplicate`, `not_on_team`, `not_on_board`, `event_closed`, or errors. A replay returned
   to the original in-flight client operation is announced because the earlier HTTP response was
   lost and therefore never reached Dink.
 - Reuse the same `claimId` across retries.

@@ -29,5 +29,5 @@ test only proves the payload reached RuneLite's event bus.
 
 Confirm nothing here regressed. See AGENTS.md for the full list.
 
-- [ ] Announces only a `claimed` response, never `duplicate` or a failure
+- [ ] Announces only an accepted outcome (`claimed` or `progress`), never `duplicate` or a failure
 - [ ] Apps Script mutations stay under `LockService.getScriptLock()`
