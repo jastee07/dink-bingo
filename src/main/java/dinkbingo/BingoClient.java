@@ -65,10 +65,10 @@ public class BingoClient {
         return !config.backendUrl().trim().isEmpty() && parseUrl() != null;
     }
 
-    public CompletableFuture<BingoBoard> fetchBoard(String rsn) {
+    public CompletableFuture<BoardResult> fetchBoard(String rsn) {
         HttpUrl base = parseUrl();
         if (base == null || rsn == null) {
-            return CompletableFuture.completedFuture(BingoBoard.EMPTY);
+            return CompletableFuture.completedFuture(BoardResult.of(BingoBoard.EMPTY));
         }
 
         BoardRequest boardRequest = new BoardRequest();
@@ -81,13 +81,19 @@ public class BingoClient {
             .build();
 
         return executeWithRetry(request, BoardResponse.class).thenApply(res -> {
-            if (res == null || res.getTiles() == null) {
+            if (res == null) {
                 log.debug("Board fetch returned nothing usable");
-                return null;
+                return BoardResult.unreachable();
             }
+            // Checked before the tile list because a rejection carries no tiles, and its
+            // reason is the whole point: it names the setup mistake behind the failure.
             if (res.getError() != null) {
                 log.warn("Bingo backend rejected board fetch: {}", res.getError());
-                return null;
+                return BoardResult.rejected(res.getError());
+            }
+            if (res.getTiles() == null) {
+                log.debug("Board fetch returned no tiles and no error");
+                return BoardResult.unreachable();
             }
             List<BingoTile> tiles = new ArrayList<>(res.getTiles().size());
             for (BoardTile tile : res.getTiles()) {
@@ -116,7 +122,7 @@ public class BingoClient {
                     tile.getClaimedBy(), tile.getClaimedAt(), claimedItem
                 ));
             }
-            return new BingoBoard(res.getTeam(), tiles, res.isEventOpen());
+            return BoardResult.of(new BingoBoard(res.getTeam(), tiles, res.isEventOpen()));
         });
     }
 

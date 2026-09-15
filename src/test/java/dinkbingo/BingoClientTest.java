@@ -94,8 +94,11 @@ class BingoClientTest {
             "\"claimedItems\":[{\"id\":21034,\"name\":\"Dexterous prayer scroll\",\"claimedBy\":\"Someone\"}]," +
             "\"options\":[{\"id\":21034,\"name\":\"Dexterous prayer scroll\"}]}]}"));
 
-        BingoBoard board = client.fetchBoard("Jake").get(5, TimeUnit.SECONDS);
+        BoardResult result = client.fetchBoard("Jake").get(5, TimeUnit.SECONDS);
 
+        assertTrue(result.isSuccess());
+        assertNull(result.getBackendError());
+        BingoBoard board = result.getBoard();
         assertEquals("Team One", board.getTeam());
         assertTrue(board.isEventOpen());
         assertEquals(2, board.getTiles().size());
@@ -121,9 +124,33 @@ class BingoClientTest {
     void preservesTheCurrentBoardWhenTheBackendRejectsTheToken() throws Exception {
         server.enqueue(json("{\"status\":\"error\",\"error\":\"bad_token\",\"tiles\":[]}"));
 
-        BingoBoard board = client.fetchBoard("Jake").get(5, TimeUnit.SECONDS);
+        BoardResult result = client.fetchBoard("Jake").get(5, TimeUnit.SECONDS);
 
-        assertNull(board);
+        assertFalse(result.isSuccess());
+        assertNull(result.getBoard());
+        assertEquals("bad_token", result.getBackendError());
+    }
+
+    /** A rejection carries no tiles at all, and its reason must still survive the fetch. */
+    @Test
+    void reportsTheBackendReasonWhenTheRejectionOmitsTiles() throws Exception {
+        server.enqueue(json("{\"status\":\"error\",\"error\":\"Error: missing sheet tab: Items\"}"));
+
+        BoardResult result = client.fetchBoard("Jake").get(5, TimeUnit.SECONDS);
+
+        assertFalse(result.isSuccess());
+        assertEquals("Error: missing sheet tab: Items", result.getBackendError());
+    }
+
+    /** A failed round trip has no backend reason, so the panel falls back to connection advice. */
+    @Test
+    void reportsNoReasonWhenTheBoardResponseNeverArrives() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(404));
+
+        BoardResult result = client.fetchBoard("Jake").get(5, TimeUnit.SECONDS);
+
+        assertFalse(result.isSuccess());
+        assertNull(result.getBackendError());
     }
 
     @Test
@@ -246,7 +273,8 @@ class BingoClientTest {
     @Test
     void returnsEmptyBoardWhenNotConfigured() throws Exception {
         when(config.backendUrl()).thenReturn("");
-        assertEquals(BingoBoard.EMPTY.getTiles(), client.fetchBoard("Jake").get(5, TimeUnit.SECONDS).getTiles());
+        assertEquals(BingoBoard.EMPTY.getTiles(),
+            client.fetchBoard("Jake").get(5, TimeUnit.SECONDS).getBoard().getTiles());
         assertEquals(0, server.getRequestCount());
     }
 

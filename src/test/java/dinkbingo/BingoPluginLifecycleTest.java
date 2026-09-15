@@ -20,6 +20,7 @@ import java.util.concurrent.ScheduledFuture;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.never;
@@ -93,13 +94,13 @@ class BingoPluginLifecycleTest {
 
     @Test
     void boardCompletionAfterShutdownIsIgnored() throws Exception {
-        CompletableFuture<BingoBoard> pending = new CompletableFuture<>();
+        CompletableFuture<BoardResult> pending = new CompletableFuture<>();
         when(bingoClient.fetchBoard("Jake")).thenReturn(pending);
         BingoBoard board = board("Current Team");
 
         plugin.startUp();
         plugin.shutDown();
-        pending.complete(board);
+        pending.complete(BoardResult.of(board));
 
         verify(detector, never()).setBoard(any());
         verify(panel, never()).render(board, true, BoardView.NAMED_TILES, false);
@@ -107,8 +108,8 @@ class BingoPluginLifecycleTest {
 
     @Test
     void overlappingRefreshesAreCoalescedAndOnlyTheNewestBoardApplies() throws Exception {
-        CompletableFuture<BingoBoard> first = new CompletableFuture<>();
-        CompletableFuture<BingoBoard> second = new CompletableFuture<>();
+        CompletableFuture<BoardResult> first = new CompletableFuture<>();
+        CompletableFuture<BoardResult> second = new CompletableFuture<>();
         when(bingoClient.fetchBoard("Jake")).thenReturn(first, second);
         BingoBoard stale = board("Stale Team");
         BingoBoard current = board("Current Team");
@@ -117,9 +118,9 @@ class BingoPluginLifecycleTest {
         plugin.refreshBoard();
         verify(bingoClient, times(1)).fetchBoard("Jake");
 
-        first.complete(stale);
+        first.complete(BoardResult.of(stale));
         verify(bingoClient, times(2)).fetchBoard("Jake");
-        second.complete(current);
+        second.complete(BoardResult.of(current));
 
         verify(detector, never()).setBoard(stale);
         verify(detector).setBoard(current);
@@ -129,7 +130,7 @@ class BingoPluginLifecycleTest {
 
     @Test
     void configuredStartupShowsLoadingUntilTheInitialBoardArrives() throws Exception {
-        CompletableFuture<BingoBoard> pending = new CompletableFuture<>();
+        CompletableFuture<BoardResult> pending = new CompletableFuture<>();
         when(bingoClient.fetchBoard("Jake")).thenReturn(pending);
         BingoBoard board = board("Current Team");
 
@@ -138,7 +139,7 @@ class BingoPluginLifecycleTest {
         verify(panel).renderLoading();
         verify(panel, never()).render(BingoBoard.EMPTY, true, BoardView.NAMED_TILES, false);
 
-        pending.complete(board);
+        pending.complete(BoardResult.of(board));
 
         verify(panel).render(board, true, BoardView.NAMED_TILES, false);
     }
@@ -152,6 +153,46 @@ class BingoPluginLifecycleTest {
 
         verify(panel).renderLoading();
         verify(panel).renderLoadError();
+    }
+
+    /** An unreachable backend is the only failure the connection message actually explains. */
+    @Test
+    void anUnreachableBackendKeepsTheConnectionMessage() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.unreachable()));
+
+        plugin.startUp();
+
+        verify(panel).renderLoadError();
+        verify(panel, never()).renderLoadError(anyString());
+    }
+
+    @Test
+    void aBackendRejectionReachesThePanelWithItsReason() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.rejected("bad_token")));
+
+        plugin.startUp();
+
+        verify(panel).renderLoading();
+        verify(panel).renderLoadError("bad_token");
+        verify(panel, never()).renderLoadError();
+    }
+
+    /** A later failure must not replace a board the player can still read. */
+    @Test
+    void aBackendRejectionAfterASuccessfulLoadLeavesTheBoardOnScreen() throws Exception {
+        BingoBoard board = board("Current Team");
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board)),
+            CompletableFuture.completedFuture(BoardResult.rejected("bad_token")));
+
+        plugin.startUp();
+        plugin.refreshBoard();
+
+        verify(panel).render(board, true, BoardView.NAMED_TILES, false);
+        verify(panel, never()).renderLoadError(anyString());
+        verify(panel, never()).renderLoadError();
     }
 
     private void inject(String name, Object value) throws Exception {

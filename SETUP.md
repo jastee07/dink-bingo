@@ -195,6 +195,9 @@ Grimy guam, say), kill something that drops it, and watch the tile close.
 | --- | --- |
 | Panel says "Not configured" | Backend URL is blank. No network calls are made until it's set. |
 | Panel says "Not on a team" | RSN missing from the `Teams` tab. |
+| Panel says "Event token rejected" | The plugin's **Event Token** does not match `token` on the `Config` tab. |
+| Panel says "Backend error: ..." | The backend refused the fetch and named the reason: a missing sheet tab, an `Items` row it cannot read, or a bad `event_start`/`event_end`. The full reason is in the client log. |
+| Panel says "Check your connection" | The request never reached the backend. This one really is network or URL. |
 | Nothing happens on a drop, no chat line | Backend unreachable, or the item id on the board doesn't match the real drop. Check `Audit`. |
 | Chat says progress/claimed, nothing in Discord | Dink's *Enable External Plugin Notifications* is off, or no webhook is set. |
 | Every claim fails silently | Deployment is not *Who has access: Anyone*. The client log names this explicitly. |

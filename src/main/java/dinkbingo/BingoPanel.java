@@ -6,6 +6,7 @@ import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
 import net.runelite.client.util.AsyncBufferedImage;
 import net.runelite.client.util.SwingUtil;
+import org.jetbrains.annotations.Nullable;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -34,6 +35,9 @@ public class BingoPanel extends PluginPanel {
 
     private static final Color CLAIMED_COLOR = new Color(0x7A, 0x7A, 0x7A);
     private static final Color OPEN_COLOR = Color.WHITE;
+
+    /** Keeps an unrecognized backend reason from pushing the sidebar out of shape. */
+    private static final int MAX_REASON_LENGTH = 80;
 
     private final ItemManager itemManager;
 
@@ -114,12 +118,76 @@ public class BingoPanel extends PluginPanel {
         ));
     }
 
-    /** Safe to call from any thread. */
+    /**
+     * The board never arrived. Safe to call from any thread.
+     * <p>
+     * Only used when the round trip itself failed, which is the one case the player's
+     * connection actually explains.
+     */
     public void renderLoadError() {
         SwingUtilities.invokeLater(() -> renderMessage(
             "Couldn't load board",
             "Check your connection, then press Refresh"
         ));
+    }
+
+    /**
+     * The backend answered and refused the fetch. Safe to call from any thread.
+     * <p>
+     * {@code backendError} is the raw {@code error} value from the response.
+     */
+    public void renderLoadError(String backendError) {
+        String reason = describeBackendError(backendError);
+        SwingUtilities.invokeLater(() -> renderMessage("Couldn't load board", reason));
+    }
+
+    /**
+     * Turns a backend {@code error} value into something an organizer can act on.
+     * <p>
+     * An unrecognized value is a custom backend's free text, so it is never rendered raw: it is
+     * prefixed, collapsed to one line, and truncated. The prefix also keeps the reason from
+     * ever starting with {@code <html>}, which Swing would otherwise render as markup, and the
+     * untruncated value is already in the log for anyone who needs the rest of it.
+     */
+    static String describeBackendError(@Nullable String backendError) {
+        String error = backendError == null ? "" : backendError.trim();
+        switch (error) {
+            case "":
+                return "Check your connection, then press Refresh";
+            case "bad_token":
+                return "Event token rejected. Check the token on the Config tab.";
+            case "lock_timeout":
+                return "The backend is busy. Press Refresh to try again.";
+            case "bad_json":
+            case "bad_request":
+            case "post_required":
+            case "unknown_action":
+                return "The backend rejected the request. Check the Apps Script deployment.";
+            default:
+                return "Backend error: " + summarize(error);
+        }
+    }
+
+    /** Collapses a backend reason to a single bounded line. */
+    private static String summarize(String error) {
+        StringBuilder out = new StringBuilder(error.length());
+        boolean pendingSpace = false;
+        for (int i = 0; i < error.length(); i++) {
+            char c = error.charAt(i);
+            if (Character.isWhitespace(c) || Character.isISOControl(c)) {
+                pendingSpace = out.length() > 0;
+                continue;
+            }
+            if (out.length() + (pendingSpace ? 2 : 1) > MAX_REASON_LENGTH) {
+                return out.append('\u2026').toString();
+            }
+            if (pendingSpace) {
+                out.append(' ');
+                pendingSpace = false;
+            }
+            out.append(c);
+        }
+        return out.toString();
     }
 
     private void renderOnEdt(

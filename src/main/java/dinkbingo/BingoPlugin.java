@@ -211,11 +211,11 @@ public class BingoPlugin extends Plugin {
             inFlightRefresh = fetchRefresh;
         }
 
-        bingoClient.fetchBoard(rsn).whenComplete((board, error) ->
-            finishRefresh(lifecycle, fetchRefresh, board, error));
+        bingoClient.fetchBoard(rsn).whenComplete((result, error) ->
+            finishRefresh(lifecycle, fetchRefresh, result, error));
     }
 
-    private void finishRefresh(long lifecycle, long fetchRefresh, BingoBoard board, Throwable error) {
+    private void finishRefresh(long lifecycle, long fetchRefresh, BoardResult result, Throwable error) {
         boolean rerun;
         synchronized (refreshStateLock) {
             if (!refreshInFlight
@@ -228,18 +228,23 @@ public class BingoPlugin extends Plugin {
             refreshPending = false;
         }
 
-        if (isCurrent(lifecycle)
-            && fetchRefresh == refreshGeneration.get()
-            && error == null
-            && board != null) {
-            currentBoard = board;
-            boardLoaded = true;
-            detector.setBoard(board);
-            renderBoard(board, true);
-        } else if (isCurrent(lifecycle)
-            && fetchRefresh == refreshGeneration.get()
-            && !boardLoaded) {
-            panel.renderLoadError();
+        if (isCurrent(lifecycle) && fetchRefresh == refreshGeneration.get()) {
+            if (error == null && result != null && result.isSuccess()) {
+                BingoBoard board = result.getBoard();
+                currentBoard = board;
+                boardLoaded = true;
+                detector.setBoard(board);
+                renderBoard(board, true);
+            } else if (!boardLoaded) {
+                // A reason only exists when the backend answered and refused. Everything
+                // else really is a failed round trip, which is what the generic message says.
+                String backendError = result == null ? null : result.getBackendError();
+                if (backendError == null) {
+                    panel.renderLoadError();
+                } else {
+                    panel.renderLoadError(backendError);
+                }
+            }
         }
         if (rerun && active) {
             refreshBoard();
