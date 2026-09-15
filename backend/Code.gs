@@ -266,16 +266,12 @@ function handleClaim(body) {
       'team ' + team + ', tile ' + tile.id + ', progress ' + progress + '/' + tile.required);
 
     state = addContribution(claims, contribution);
-    var remaining = countRemaining(team, claims, catalog.tiles);
 
-    if (truthy(cfg.announce_from_backend) && cfg.discord_webhook) {
-      var label = item.name === tile.name ? '**' + item.name + '**' :
-        '**' + item.name + '** for **' + tile.name + '**';
-      var verb = complete ? 'completed' : 'advanced';
-      postDiscord(cfg.discord_webhook, rsn + ' ' + verb + ' ' + label + ' for ' + team +
-        ' — ' + progress + '/' + tile.required + ' items');
-    }
-
+    // Nothing here may make an outbound request. Announcements are the client's job: only the
+    // plugin can screenshot the drop, and a backend embed without one is weaker proof than no
+    // embed at all. Keeping the claim path free of UrlFetchApp also means a slow or
+    // rate-limited Discord endpoint can never extend the script lock hold and turn concurrent
+    // drops into lock_timeout retries.
     return json(claimResult(status, false, team, tile, contribution, state, claims, catalog));
   } finally {
     lock.releaseLock();
@@ -748,20 +744,6 @@ function json(obj) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-function postDiscord(webhook, content) {
-  try {
-    UrlFetchApp.fetch(webhook, {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify({ content: content }),
-      muteHttpExceptions: true
-    });
-  } catch (err) {
-    // Fetch failures can include the requested URL; never copy a webhook into logs.
-    console.error('discord post failed');
-  }
-}
-
 // ---------------------------------------------------------------------------
 // one-time setup
 // ---------------------------------------------------------------------------
@@ -795,10 +777,8 @@ function setupSheet() {
   if (cfg.getLastRow() <= 1) {
     cfg.appendRow(['token', Utilities.getUuid()]);
     cfg.appendRow(['admin_token', Utilities.getUuid()]);
-    cfg.appendRow(['discord_webhook', '']);
     cfg.appendRow(['event_start', '']);
     cfg.appendRow(['event_end', '']);
-    cfg.appendRow(['announce_from_backend', 'false']);
   }
 
   var items = ss.getSheetByName(SHEET_ITEMS);

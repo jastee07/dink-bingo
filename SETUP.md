@@ -44,7 +44,8 @@ config. Total player-side effort is about a minute.
 7. **`Config` tab** — optionally set `event_start` / `event_end` as real Sheet date/time cells
    (recommended), or `yyyy-MM-dd HH:mm` text interpreted in the spreadsheet timezone. Start and
    end are inclusive; claims outside the window are rejected with `event_closed`. Invalid or
-   reversed boundaries fail closed. Leave `announce_from_backend` as `false` if players run Dink.
+   reversed boundaries fail closed. The backend never posts to Discord; every announcement
+   comes from a player's own Dink install, which is what attaches the screenshot.
 8. **`Leaderboard` tab** — read-only event view. It shows K-of-N progress, completed tiles,
    earned points, remaining tiles, and remaining points for every team. Points are awarded only
    when progress reaches `required_count`. Make corrections in `Items`, `Teams`, or `Claims`;

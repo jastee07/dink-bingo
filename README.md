@@ -186,8 +186,8 @@ participant. The mitigations are visibility and reversibility:
 - No RuneLite account hash is collected.
 - `Audit` stores only allowlisted operational fields; tokens and webhook URLs are redacted.
 - `admin_token` is organizer-only and enables item-level or whole-tile unclaim.
-- A backend `discord_webhook` remains in the organizer-owned Sheet and is never returned by
-  the API. A player's Dink webhook remains in their secret RuneLite configuration.
+- The backend holds no webhook and makes no outbound requests; a player's Dink webhook
+  remains in their own secret RuneLite configuration.
 
 For a friendly clan event this is the right trade-off. If you need more, move the backend off
 Apps Script and issue per-player tokens.

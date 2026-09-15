@@ -32,20 +32,20 @@ and the final `claimed` contribution.
    options. Use `1` for 1-of-N and `3` for 3-of-5. Counts are based on distinct item ids, not
    stack quantity. Fill in `Teams` as `rsn` → `team`; team names are exact identifiers.
 5. In **File → Settings**, set the spreadsheet **Time zone** to the organizer's intended event
-   timezone. Optionally set `discord_webhook`, `event_start`, `event_end`, and
-   `announce_from_backend` in `Config`. Enter start/end as real Google Sheets date/time values
-   (recommended), or as text in `yyyy-MM-dd HH:mm` format. Text values use the spreadsheet
-   timezone; ISO 8601 text must include `Z` or an explicit UTC offset. Start and end are
-   inclusive, and invalid or reversed boundaries reject requests instead of opening the event.
-   Leave `announce_from_backend` as `false` if your players run Dink — Dink's own announcement
-   includes a screenshot, the backend's does not.
+   timezone. Optionally set `event_start` and `event_end` in `Config`. Enter them as real
+   Google Sheets date/time values (recommended), or as text in `yyyy-MM-dd HH:mm` format. Text
+   values use the spreadsheet timezone; ISO 8601 text must include `Z` or an explicit UTC
+   offset. Start and end are inclusive, and invalid or reversed boundaries reject requests
+   instead of opening the event.
+
+   The backend does not post to Discord. Announcements come from each player's client through
+   Dink, because only the client can screenshot the drop.
 6. **Deploy → New deployment → Web app**, *Execute as* **Me**, *Who has access* **Anyone**.
    Copy the `/exec` URL.
 
 Keep the spreadsheet organizer-only. Give participants the `/exec` URL and player `token`,
-not access to the editable Sheet. The `admin_token` and optional `discord_webhook` remain in
-the organizer-owned `Config` tab and are never returned by the API. Hiding that tab is cosmetic,
-not access control.
+not access to the editable Sheet. The `admin_token` remains in the organizer-owned `Config`
+tab and is never returned by the API. Hiding that tab is cosmetic, not access control.
 
 `Leaderboard` is a formula-driven, read-only view of the authoritative tabs. Its team summary
 shows completed tiles, earned points, remaining tiles, and remaining points; the matrix below
@@ -189,7 +189,12 @@ For every existing sheet using the original one-item schema:
 5. Give participants only the current player token.
 6. Delete the retired `account_hash` column from `Claims` if you no longer want the empty
    legacy column.
-7. Deploy a new web-app version and update players to the threshold-capable plugin build
+7. Delete the `announce_from_backend` and `discord_webhook` rows from `Config` if they are
+   present. The backend no longer reads either one, and leaving a live webhook URL sitting in
+   the sheet is a credential you are not using. Rotate that webhook in Discord if it was ever
+   populated. Players who relied on backend announcements need Dink configured instead; see
+   [`SETUP.md`](../SETUP.md).
+8. Deploy a new web-app version and update players to the threshold-capable plugin build
    together.
    The `/exec` URL stays the same.
 
@@ -208,8 +213,8 @@ board lookup or claim. The mitigations are visibility and reversibility:
   source, claim id, progress-after value, completion flag, and timestamp; it does not receive
   a RuneLite account hash.
 - `admin_token` is organizer-only and enables item-level or whole-tile unclaim.
-- `discord_webhook` is read only by Apps Script when backend announcements are enabled and is
-  never included in an API response or Audit row.
+- The backend holds no webhook and makes no outbound requests. Discord delivery belongs
+  entirely to each player's own Dink configuration.
 
 ### Unauthenticated traffic
 

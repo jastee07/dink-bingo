@@ -81,8 +81,8 @@ Before making the test claim:
 
 The curl examples in `backend/README.md` are not read-only except `ping` and `board`.
 Claim, replay, concurrency, and unclaim requests mutate the deployed sheet and may trigger a
-backend Discord post when `announce_from_backend=true`. Do not run them against a live event
-without explicit authorization and a reversible test tile/team.
+live event's Claims and Audit rows. Do not run them against a live event without explicit
+authorization and a reversible test tile/team.
 
 ## Invariants to preserve
 

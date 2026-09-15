@@ -26,7 +26,9 @@ import java.util.regex.Pattern;
  * <p>
  * Requires the user to enable Dink's <em>External Plugin Requests &gt; Enable External Plugin
  * Notifications</em>. If Dink is absent or that setting is off, the message is silently
- * dropped by Dink; set {@code announce_from_backend} on the sheet as the fallback.
+ * dropped by Dink and the claim is announced nowhere. The claim itself is unaffected: the
+ * sheet already committed it. There is no backend fallback, because a backend embed carries
+ * no screenshot and is weaker proof than none.
  *
  * @see <a href="https://github.com/pajlads/DinkPlugin/blob/master/docs/external-plugin-messaging.md">Dink external plugin messaging</a>
  */

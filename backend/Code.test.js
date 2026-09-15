@@ -23,8 +23,7 @@ const sheets = {
   Config: [
     ["key", "value"],
     ["token", "participant-secret"],
-    ["admin_token", "organizer-secret"],
-    ["announce_from_backend", "false"]
+    ["admin_token", "organizer-secret"]
   ]
 };
 
@@ -94,6 +93,13 @@ const context = {
           }
         }
       };
+    }
+  },
+  UrlFetchApp: {
+    fetch(url) {
+      throw new Error(
+        "the backend must not make outbound requests; see the announcement boundary in AGENTS.md"
+      );
     }
   },
   CacheService: {
@@ -638,6 +644,49 @@ assert.strictEqual(
   sheets.Audit.length,
   auditRowsBeforeBadAuth + 1,
   "authenticated rejections remain auditable"
+);
+
+// ---------------------------------------------------------------------------
+// The backend never announces (#32).
+//
+// Announcing from Apps Script meant calling UrlFetchApp while the script lock was held, so a
+// slow or rate-limited Discord endpoint could extend the hold and turn concurrent drops into
+// lock_timeout retries. The announcement is the client's job regardless: only the plugin can
+// screenshot the drop. The UrlFetchApp stub above throws, so any claim path that tried to
+// reach the network would fail this suite rather than silently regress.
+// ---------------------------------------------------------------------------
+
+assert.strictEqual(
+  typeof context.postDiscord,
+  "undefined",
+  "postDiscord must not exist; the backend has no announcement path"
+);
+
+// Even with the retired Config keys still present on an organizer's sheet, a claim must
+// neither read them nor act on them.
+sheets.Config.push(["announce_from_backend", "true"]);
+sheets.Config.push(["discord_webhook", "https://discord.invalid/webhook"]);
+const claimWithLegacyAnnounceConfig = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 11832,
+  itemName: "Bandos chestplate",
+  claimId: "no-backend-announce"
+}));
+assert.strictEqual(
+  claimWithLegacyAnnounceConfig.status,
+  "claimed",
+  "a claim still succeeds when retired announcement keys linger in Config"
+);
+assert.strictEqual(lockDepth, 0, "the claim released the script lock");
+sheets.Config.pop();
+sheets.Config.pop();
+
+// setupSheet must not reintroduce a place to paste a webhook into the sheet.
+const setupSource = code.slice(code.indexOf("function setupSheet"));
+assert(
+  !setupSource.includes("discord_webhook") && !setupSource.includes("announce_from_backend"),
+  "setupSheet must not seed retired announcement Config keys"
 );
 
 console.log("Apps Script grouped-tile and security tests passed");
