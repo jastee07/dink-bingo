@@ -31,6 +31,10 @@ and the final `claimed` contribution.
    fail visibly. `required_count` is a whole number between 1 and the number of distinct tile
    options. Use `1` for 1-of-N and `3` for 3-of-5. Counts are based on distinct item ids, not
    stack quantity. Fill in `Teams` as `rsn` → `team`; team names are exact identifiers.
+   `Teams` is validated too: two rows for the same player (case and `_`/space are normalized,
+   and runs of separators collapse) are rejected naming both rows, as is a row with only one
+   of `rsn`/`team` filled in. Fully blank rows are ignored. The `rsn` spelling you enter is
+   what appears in `Claims`, the sidebar, and the `Leaderboard`.
 5. In **File → Settings**, set the spreadsheet **Time zone** to the organizer's intended event
    timezone. Optionally set `event_start` and `event_end` in `Config`. Enter them as real
    Google Sheets date/time values (recommended), or as text in `yyyy-MM-dd HH:mm` format. Text

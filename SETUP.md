@@ -36,9 +36,22 @@ config. Total player-side effort is about a minute.
    distinct options. Quantities do not count: one drop of two blue dyes is still one distinct
    option.
 5. **`Teams` tab** — one row per player: `rsn`, `team`. This is the only place team membership
-   lives. RSNs are matched case-insensitively with `_` treated as a space, so `Zezima` and
-   `zez ima` behave as you'd expect. Use the exact same spelling and capitalization for every
-   member of a team; each distinct team name gets its own claim state for every logical tile.
+   lives. RSNs are matched case-insensitively with `_` treated as a space and runs of
+   separators collapsed, so `Zezima`, `zez ima`, and `Zez__Ima` are all the same player.
+
+   The tab is validated on every board and claim request, and ambiguous configuration fails
+   visibly instead of silently picking a row:
+
+   - Two rows for the same player — including spelling variants like `Jake_Steele` and
+     `jake steele` — are rejected, naming both row numbers. Previously the first row won.
+   - A row with an `rsn` but no `team`, or a `team` but no `rsn`, is rejected and names the
+     row. A half-filled row used to look exactly like a player who was never added.
+   - Fully blank rows are ignored, so trailing spreadsheet padding is fine.
+
+   Use the exact same spelling and capitalization for every member of a team; each distinct
+   team name gets its own claim state for every logical tile. Whatever spelling you use for a
+   player's `rsn` is the one shown in the sidebar and on the `Leaderboard` when they
+   contribute, so write it the way you want it to read.
 6. **Event time zone** — in **File → Settings**, set the spreadsheet **Time zone** to the
    organizer's intended event timezone. This single setting is authoritative for every player.
 7. **`Config` tab** — optionally set `event_start` / `event_end` as real Sheet date/time cells
@@ -197,6 +210,8 @@ Grimy guam, say), kill something that drops it, and watch the tile close.
 | --- | --- |
 | Panel says "Not configured" | Backend URL is blank. No network calls are made until it's set. |
 | Panel says "Not on a team" | RSN missing from the `Teams` tab. |
+| Panel says "Backend error: Teams row N ..." | That `Teams` row has an `rsn` with no `team`, or a `team` with no `rsn`. Fill it in or clear it. |
+| Panel says "Backend error: Teams rows N and M ..." | Two rows are the same player once case and `_`/space are normalized. Delete one. |
 | Panel says "Event token rejected" | The plugin's **Event Token** does not match `token` on the `Config` tab. |
 | Panel says "Backend error: ..." | The backend refused the fetch and named the reason: a missing sheet tab, an `Items` row it cannot read, or a bad `event_start`/`event_end`. The full reason is in the client log. |
 | Panel says "Check your connection" | The request never reached the backend. This one really is network or URL. |

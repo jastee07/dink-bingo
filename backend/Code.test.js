@@ -689,4 +689,138 @@ assert(
   "setupSheet must not seed retired announcement Config keys"
 );
 
+// ---------------------------------------------------------------------------
+// Teams validation and display casing (#38).
+//
+// resolveTeam used to return the first row whose normalized name matched, so two rows for the
+// same player silently resolved to whichever came first, and a half-filled row looked exactly
+// like an unlisted player. Teams is as load-bearing as Items and now fails just as visibly.
+// ---------------------------------------------------------------------------
+
+const teamsBeforeRosterTests = sheets.Teams.map(row => row.slice());
+const claimsBeforeRosterTests = sheets.Claims.map(row => row.slice());
+
+// RuneScape names ignore case, treat _ and space as equivalent, and never contain runs of
+// separators. All of these are one player.
+["Jake Steele", "jake_steele", "JAKE__STEELE", "  Jake   Steele  ", "jake_ steele"]
+  .forEach(variant => {
+    assert.strictEqual(
+      context.normalizeRsn(variant),
+      "jake steele",
+      variant + " must normalize to a single lookup key"
+    );
+  });
+assert.strictEqual(context.normalizeRsn("  "), null, "a blank name has no lookup key");
+assert.strictEqual(context.normalizeRsn(null), null);
+
+// Two spellings of one name on different teams is ambiguous configuration, not a silent
+// first-row win. The error names both rows so the organizer can find them.
+sheets.Teams = [
+  ["rsn", "team"],
+  ["Jake_Steele", "Team One"],
+  ["jake steele", "Team Two"]
+];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake_Steele"}),
+  /Teams rows 2 and 3 are the same RuneScape name/,
+  "duplicate normalized RSNs must fail with both row numbers"
+);
+
+// A name with no team reads as an unlisted player unless it is called out explicitly.
+sheets.Teams = [["rsn", "team"], ["Jake_Steele", ""]];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake_Steele"}),
+  /Teams row 2 has rsn "Jake_Steele" with no team/,
+  "a nonblank rsn with a blank team must identify its row"
+);
+
+sheets.Teams = [["rsn", "team"], ["", "Team One"]];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake"}),
+  /Teams row 2 assigns a team with no rsn/
+);
+
+// Trailing blank rows are ordinary spreadsheet padding and must not fail the event.
+sheets.Teams = [["rsn", "team"], ["Jake_Steele", "Team One"], ["", ""], ["", ""]];
+const paddedBoard = output(context.handleBoard({
+  token: "participant-secret",
+  rsn: "jake steele"
+}));
+assert.strictEqual(paddedBoard.status, "ok");
+assert.strictEqual(
+  paddedBoard.team,
+  "Team One",
+  "blank padding rows are skipped and lookup stays separator-insensitive"
+);
+
+// Claims record the organizer's spelling, not the normalized lookup key, so the sidebar and
+// Leaderboard show the name a human recognises.
+sheets.Claims = [claimsBeforeRosterTests[0].slice()];
+const casedClaim = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "JAKE__STEELE",
+  itemId: 11832,
+  itemName: "Bandos chestplate",
+  claimId: "display-casing-1"
+}));
+assert.strictEqual(casedClaim.status, "claimed");
+assert.strictEqual(
+  casedClaim.claimedBy,
+  "Jake_Steele",
+  "the claim response reports the canonical Teams spelling"
+);
+const rsnColumn = claimsBeforeRosterTests[0].indexOf("rsn");
+assert.strictEqual(
+  sheets.Claims[1][rsnColumn],
+  "Jake_Steele",
+  "the Claims row stores the canonical Teams spelling"
+);
+const casedBoard = output(context.handleBoard({
+  token: "participant-secret",
+  rsn: "jake_steele"
+}));
+const casedTile = casedBoard.tiles.find(tile => tile.id === "11832");
+assert.strictEqual(casedTile.claimedBy, "Jake_Steele", "the board shows the canonical spelling");
+
+// A Teams tab that goes ambiguous mid-event must not strand a claim the Sheet already
+// committed. The client treats a rejection as resolved, so a retry that failed here would
+// lose the announcement for a real claim -- the same reason not_on_team sits behind the
+// replay check.
+sheets.Teams = [
+  ["rsn", "team"],
+  ["Jake_Steele", "Team One"],
+  ["jake steele", "Team Two"]
+];
+const replayThroughBadRoster = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "JAKE__STEELE",
+  itemId: 11832,
+  claimId: "display-casing-1"
+}));
+assert.strictEqual(replayThroughBadRoster.status, "claimed");
+assert.strictEqual(replayThroughBadRoster.replay, true);
+assert.strictEqual(
+  replayThroughBadRoster.claimedBy,
+  "Jake_Steele",
+  "the replay reports the spelling recorded at claim time"
+);
+assert.strictEqual(lockDepth, 0, "the replay released the script lock");
+
+// A brand new claim against the same ambiguous roster still fails visibly.
+assert.throws(
+  () => context.handleClaim({
+    token: "participant-secret",
+    rsn: "Jake_Steele",
+    itemId: 4151,
+    itemName: "Abyssal whip",
+    claimId: "ambiguous-roster-1"
+  }),
+  /Teams rows 2 and 3 are the same RuneScape name/,
+  "a fresh claim must not pick a team out of an ambiguous roster"
+);
+assert.strictEqual(lockDepth, 0, "the failed claim released the script lock");
+
+sheets.Teams = teamsBeforeRosterTests;
+sheets.Claims = claimsBeforeRosterTests;
+
 console.log("Apps Script grouped-tile and security tests passed");

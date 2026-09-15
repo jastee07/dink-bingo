@@ -85,7 +85,8 @@ function handleBoard(params) {
   }
 
   var rsn = normalizeRsn(params.rsn);
-  var team = resolveTeam(rsn);
+  var member = rosterMember(requireRoster(readRoster()), rsn);
+  var team = member ? member.team : null;
   var catalog = readTiles();
   var claims = readClaims();
 
@@ -160,7 +161,7 @@ function handleClaim(body) {
   // already committed must replay rather than turn into not_on_team: the client treats
   // not_on_team as resolved, so it would stop retrying and never announce a real claim.
   var catalog = readTiles();
-  var team = resolveTeam(rsn);
+  var roster = readRoster();
 
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
@@ -196,6 +197,10 @@ function handleClaim(body) {
       return json({ status: 'event_closed' });
     }
 
+    // Past the replay check, so an ambiguous Teams tab can now fail visibly without stranding
+    // a claim the Sheet already committed.
+    var member = rosterMember(requireRoster(roster), rsn);
+    var team = member ? member.team : null;
     if (!team) {
       auditLocked(rsn, itemId, 'not_on_team', body, '');
       return json({ status: 'not_on_team' });
@@ -240,7 +245,9 @@ function handleClaim(body) {
       tileName: tile.name,
       itemId: itemId,
       itemName: item.name,
-      rsn: rsn,
+      // The organizer's spelling from Teams, not the normalized lookup key, so the sidebar
+      // and Leaderboard show "Jake_Steele" rather than "jake steele".
+      rsn: member.rsn,
       claimedAt: now,
       claimId: body.claimId || Utilities.getUuid(),
       source: body.source || '',
@@ -581,16 +588,74 @@ function requireColumns(headers, sheetName, required) {
   return columns;
 }
 
-function resolveTeam(rsn) {
-  if (!rsn) return null;
+/**
+ * Read Teams into a validated lookup keyed by normalized RuneScape name.
+ *
+ * The previous implementation rescanned the tab for every request and returned the first row
+ * whose normalized name matched, so `Jake_Steele` on one team and `jake steele` on another
+ * silently resolved to whichever appeared first. Items already fails visibly on ambiguous
+ * configuration; Teams is just as load-bearing and now does the same.
+ *
+ * Validation problems are returned rather than thrown so the caller decides when they matter.
+ * A claim the Sheet already committed must still replay even if the organizer has since
+ * introduced a bad Teams row, for the same reason the not_on_team check sits behind the
+ * claimId replay check: the client treats a rejection as resolved and would stop retrying.
+ */
+function readRoster() {
+  var roster = { byRsn: {}, error: null };
   var values = sheet(SHEET_TEAMS).getDataRange().getValues();
-  for (var r = 1; r < values.length; r++) {
-    if (normalizeRsn(values[r][0]) === rsn) {
-      var team = String(values[r][1] || '').trim();
-      return team || null;
-    }
+  var columns = headerMap(values[0] || []);
+  if (columns.rsn == null || columns.team == null) {
+    roster.error = SHEET_TEAMS + ' is missing the rsn or team column';
+    return roster;
   }
-  return null;
+
+  for (var r = 1; r < values.length; r++) {
+    var row = r + 1;
+    var rawRsn = String(values[r][columns.rsn] || '').trim();
+    var team = String(values[r][columns.team] || '').trim();
+
+    // A fully blank row is ordinary spreadsheet padding, not a configuration mistake.
+    if (!rawRsn && !team) continue;
+
+    if (!rawRsn) {
+      roster.error = SHEET_TEAMS + ' row ' + row + ' assigns a team with no rsn';
+      return roster;
+    }
+    if (!team) {
+      // Without this a half-filled row is indistinguishable from an unlisted player, so the
+      // player is told they are not on a team and the organizer never learns which row is bad.
+      roster.error = SHEET_TEAMS + ' row ' + row + ' has rsn "' + rawRsn + '" with no team';
+      return roster;
+    }
+
+    var key = normalizeRsn(rawRsn);
+    if (!key) {
+      roster.error = SHEET_TEAMS + ' row ' + row + ' has an unusable rsn';
+      return roster;
+    }
+    var existing = roster.byRsn[key];
+    if (existing) {
+      roster.error = SHEET_TEAMS + ' rows ' + existing.row + ' and ' + row +
+        ' are the same RuneScape name ("' + existing.rsn + '" and "' + rawRsn +
+        '"); names are case-insensitive and treat _ and space as equivalent';
+      return roster;
+    }
+
+    // Keep the organizer's spelling for display. Normalized names are lookup keys only.
+    roster.byRsn[key] = { rsn: rawRsn, team: team, row: row };
+  }
+  return roster;
+}
+
+/** Raise a deferred Teams validation failure at the point the roster is actually needed. */
+function requireRoster(roster) {
+  if (roster.error) throw new Error(roster.error);
+  return roster;
+}
+
+function rosterMember(roster, rsn) {
+  return rsn ? roster.byRsn[rsn] || null : null;
 }
 
 /**
@@ -683,7 +748,11 @@ function sanitizeAuditPayload(payload) {
 /** RuneScape names treat underscore and space as equivalent and are case-insensitive. */
 function normalizeRsn(rsn) {
   if (rsn == null) return null;
-  var s = String(rsn).trim().replace(/[ _]/g, ' ').toLowerCase();
+  // RuneScape names are case-insensitive, treat underscore and space as equivalent, and
+  // never contain consecutive or edge separators. Collapsing runs and re-trimming afterwards
+  // means "Jake__Steele" and "jake steele" are recognised as one player, not two. The
+  // class keeps the non-breaking space a spreadsheet paste can introduce.
+  var s = String(rsn).replace(/[  _]+/g, ' ').trim().toLowerCase();
   return s || null;
 }
 
