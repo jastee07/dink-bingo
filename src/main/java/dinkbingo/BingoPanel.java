@@ -23,7 +23,9 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.StringJoiner;
 
@@ -225,6 +227,15 @@ public class BingoPanel extends PluginPanel {
         if (boardView == BoardView.POSSIBLE_ITEMS) {
             for (BingoTile tile : board.getTiles()) {
                 if (tile.isClaimed()) {
+                    if (hideCompletedTiles) {
+                        continue;
+                    }
+                    // Nothing on a completed tile can still drop, so its credited items are
+                    // struck through rather than listed as options.
+                    for (BingoContribution credited : creditedContributions(tile)) {
+                        itemsPanel.add(buildCreditedItemRow(tile, credited), c);
+                        c.gridy++;
+                    }
                     continue;
                 }
                 Set<Integer> creditedIds = creditedIds(tile);
@@ -345,6 +356,52 @@ public class BingoPanel extends PluginPanel {
             progress.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
             progress.setToolTipText(tile.getName());
             row.add(progress, BorderLayout.EAST);
+        }
+
+        return row;
+    }
+
+    /**
+     * The items credited to a completed tile. A backend that reports only the winning item
+     * still names one row, so the tile never disappears from the item view silently.
+     */
+    private static List<BingoContribution> creditedContributions(BingoTile tile) {
+        List<BingoContribution> credited = new ArrayList<>(tile.getClaimedItems());
+        BingoItem won = tile.getClaimedItem();
+        if (won != null && !creditedIds(tile).contains(won.getId())) {
+            credited.add(new BingoContribution(
+                won.getId(), won.getName(), tile.getClaimedBy(), tile.getClaimedAt()));
+        }
+        return credited;
+    }
+
+    private JPanel buildCreditedItemRow(BingoTile tile, BingoContribution credited) {
+        JPanel row = new JPanel(new BorderLayout(6, 0));
+        row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+        row.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+
+        JLabel icon = new JLabel();
+        icon.setPreferredSize(new Dimension(36, 32));
+        itemManager.getImage(credited.getId()).addTo(icon);
+        row.add(icon, BorderLayout.WEST);
+
+        String claimedBy = credited.getClaimedBy() != null
+            ? credited.getClaimedBy() : tile.getClaimedBy();
+
+        JLabel name = new JLabel();
+        name.setFont(FontManager.getRunescapeSmallFont());
+        // Strikethrough via HTML is the only way to get it on a plain JLabel.
+        name.setText("<html><s>" + escape(credited.getName()) + "</s></html>");
+        name.setForeground(CLAIMED_COLOR);
+        name.setToolTipText("Completed " + tile.getName()
+            + (claimedBy == null ? "" : ", credited to " + claimedBy));
+        row.add(name, BorderLayout.CENTER);
+
+        if (claimedBy != null) {
+            JLabel by = new JLabel(claimedBy);
+            by.setFont(FontManager.getRunescapeSmallFont());
+            by.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
+            row.add(by, BorderLayout.EAST);
         }
 
         return row;

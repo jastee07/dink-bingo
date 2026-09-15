@@ -95,7 +95,7 @@ class BingoPanelTest {
     }
 
     @Test
-    void possibleItemsShowsOnlyEligibleOptionsForUnfinishedTiles() throws Exception {
+    void possibleItemsShowsEligibleOptionsAndStrikesOutCompletedTiles() throws Exception {
         ItemManager itemManager = mock(ItemManager.class);
         when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
         BingoPanel panel = new BingoPanel(itemManager);
@@ -130,10 +130,96 @@ class BingoPanelTest {
         BorderLayout layout = (BorderLayout) panel.getLayout();
         JScrollPane scrollPane = (JScrollPane) layout.getLayoutComponent(BorderLayout.CENTER);
         JPanel itemList = (JPanel) scrollPane.getViewport().getView();
-        assertEquals(2, itemList.getComponentCount());
+        assertEquals(3, itemList.getComponentCount());
         assertEquals("Arcane prayer scroll", rowName(itemList.getComponent(0)));
         assertEquals("Twisted buckler", rowName(itemList.getComponent(1)));
+        assertEquals("<html><s>Completed item</s></html>", rowName(itemList.getComponent(2)));
         assertEquals("1 of 2 tiles left", statusText(panel));
+    }
+
+    /**
+     * The setting reads as a board-wide one, so the item view has to answer to it the way the
+     * named-tile view does rather than hiding completed tiles unconditionally.
+     */
+    @Test
+    void possibleItemsDropsCompletedTilesWhenTheSettingIsOn() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+
+        BingoTile unfinished = new BingoTile(
+            "scroll",
+            "Any prayer scroll",
+            1,
+            1,
+            0,
+            Collections.singletonList(new BingoItem(1, "Dexterous prayer scroll")),
+            Collections.emptyList(),
+            false,
+            null,
+            null,
+            null
+        );
+        BingoTile completed = tile(4, "Completed item", true);
+
+        panel.render(new BingoBoard("Team One",
+                java.util.Arrays.asList(unfinished, completed), true),
+            true, BoardView.POSSIBLE_ITEMS, true);
+        SwingUtilities.invokeAndWait(() -> {
+            // Flush the render queued by BingoPanel.render.
+        });
+
+        BorderLayout layout = (BorderLayout) panel.getLayout();
+        JScrollPane scrollPane = (JScrollPane) layout.getLayoutComponent(BorderLayout.CENTER);
+        JPanel itemList = (JPanel) scrollPane.getViewport().getView();
+        assertEquals(1, itemList.getComponentCount());
+        assertEquals("Dexterous prayer scroll", rowName(itemList.getComponent(0)));
+    }
+
+    /** Every distinct item that counted toward a threshold tile stays listed once. */
+    @Test
+    void possibleItemsListsEveryCreditedItemOfACompletedThresholdTile() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+
+        BingoItem won = new BingoItem(2, "Arcane prayer scroll");
+        BingoTile completed = new BingoTile(
+            "raids",
+            "Any two raids uniques",
+            2,
+            2,
+            2,
+            java.util.Arrays.asList(
+                new BingoItem(1, "Dexterous prayer scroll"),
+                won,
+                new BingoItem(3, "Twisted buckler")
+            ),
+            java.util.Arrays.asList(
+                new BingoContribution(1, "Dexterous prayer scroll", "Jake", null),
+                new BingoContribution(2, "Arcane prayer scroll", "Sam", null)
+            ),
+            true,
+            "Sam",
+            null,
+            won
+        );
+
+        panel.render(new BingoBoard("Team One",
+                Collections.singletonList(completed), true),
+            true, BoardView.POSSIBLE_ITEMS, false);
+        SwingUtilities.invokeAndWait(() -> {
+            // Flush the render queued by BingoPanel.render.
+        });
+
+        BorderLayout layout = (BorderLayout) panel.getLayout();
+        JScrollPane scrollPane = (JScrollPane) layout.getLayoutComponent(BorderLayout.CENTER);
+        JPanel itemList = (JPanel) scrollPane.getViewport().getView();
+        assertEquals(2, itemList.getComponentCount());
+        assertEquals("<html><s>Dexterous prayer scroll</s></html>",
+            rowName(itemList.getComponent(0)));
+        assertEquals("<html><s>Arcane prayer scroll</s></html>",
+            rowName(itemList.getComponent(1)));
     }
 
     @Test
