@@ -8,11 +8,14 @@ import okhttp3.HttpUrl;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.StringJoiner;
+import java.util.regex.Pattern;
 
 /**
  * Hands a successful claim to Dink, which renders the embed, attaches the screenshot, and
@@ -36,6 +39,13 @@ public class BingoAnnouncer {
     private static final String SOURCE_PLUGIN = "Bingo with Dink Notifications";
     private static final String ITEM_ICON_URL = "https://static.runelite.net/cache/item/icon/";
     private static final String WIKI_SEARCH_URL = "https://oldschool.runescape.wiki/w/Special:Search?search=";
+
+    /**
+     * Discord formatting characters that would be read as markup inside a link label rather
+     * than as part of the item name. {@code ]} ends the label early and takes the link with
+     * it; the rest only distort the rendered name.
+     */
+    private static final Pattern MARKDOWN_METACHARACTER = Pattern.compile("[\\\\`*_~|\\[\\]]");
 
     private final EventBus eventBus;
     private final BingoConfig config;
@@ -160,11 +170,16 @@ public class BingoAnnouncer {
     private static Map<String, String> linkReplacement(String text, String link) {
         Map<String, String> replacement = new HashMap<>(2);
         replacement.put("value", text);
-        replacement.put("richValue", "[" + text + "](" + link + ")");
+        replacement.put("richValue", "[" + escapeMarkdown(text) + "](" + link + ")");
         return replacement;
     }
 
+    private static String escapeMarkdown(String text) {
+        return MARKDOWN_METACHARACTER.matcher(text).replaceAll("\\\\$0");
+    }
+
     private static String urlEncode(String text) {
-        return text.replace(" ", "+");
+        // Query-string encoding, so spaces become '+' and everything else is percent-escaped.
+        return URLEncoder.encode(text, StandardCharsets.UTF_8);
     }
 }

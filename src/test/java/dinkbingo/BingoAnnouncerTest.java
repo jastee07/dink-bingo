@@ -63,9 +63,7 @@ class BingoAnnouncerTest {
     void suppliesReplacementsForEveryTemplateToken() {
         announcer.announce(claim(BingoResponses.CLAIMED), "Abyssal demon");
 
-        @SuppressWarnings("unchecked")
-        Map<String, Map<String, String>> replacements =
-            (Map<String, Map<String, String>>) capture().getData().get("replacements");
+        Map<String, Map<String, String>> replacements = replacements();
 
         assertEquals("Abyssal whip", replacements.get("%ITEM%").get("value"));
         assertTrue(replacements.get("%ITEM%").get("richValue").contains("oldschool.runescape.wiki"));
@@ -75,6 +73,34 @@ class BingoAnnouncerTest {
         assertEquals("2", replacements.get("%REQUIRED%").get("value"));
         assertEquals("3", replacements.get("%REMAINING%").get("value"));
         assertEquals("Abyssal demon", replacements.get("%SOURCE%").get("value"));
+    }
+
+    @Test
+    void linksTheItemNameToAWikiSearchForIt() {
+        announcer.announce(claim(BingoResponses.CLAIMED), "Abyssal demon");
+
+        assertEquals(
+            "[Abyssal whip](https://oldschool.runescape.wiki/w/Special:Search?search=Abyssal+whip)",
+            replacements().get("%ITEM%").get("richValue"));
+    }
+
+    /**
+     * The search term is a query-string value and the label is Discord markdown, so an item
+     * name is only safe in either position once it has been encoded for that position.
+     */
+    @Test
+    void encodesTheWikiLinkForItemNamesCarryingQueryOrMarkdownCharacters() {
+        ClaimResponse response = claim(BingoResponses.CLAIMED);
+        response.setItemName("Odd item & co + [special]");
+
+        announcer.announce(response, "Abyssal demon");
+
+        Map<String, String> item = replacements().get("%ITEM%");
+        assertEquals("Odd item & co + [special]", item.get("value"));
+        assertEquals(
+            "[Odd item & co + \\[special\\]](https://oldschool.runescape.wiki/w/Special:Search"
+                + "?search=Odd+item+%26+co+%2B+%5Bspecial%5D)",
+            item.get("richValue"));
     }
 
     @Test
@@ -172,6 +198,11 @@ class BingoAnnouncerTest {
     }
 
     // ------------------------------------------------------------------
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Map<String, String>> replacements() {
+        return (Map<String, Map<String, String>>) capture().getData().get("replacements");
+    }
 
     private PluginMessage capture() {
         ArgumentCaptor<PluginMessage> captor = ArgumentCaptor.forClass(PluginMessage.class);
