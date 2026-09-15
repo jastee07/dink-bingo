@@ -40,6 +40,14 @@ Run from the repository root:
 ./gradlew test
 ```
 
+Gradle 9 requires a JVM of 17 or later to run, so the build needs a JDK 17+ (CI uses 21)
+even though the plugin itself is Java 11. `JavaCompile` pins `options.release` to 11 rather
+than setting `sourceCompatibility`/`targetCompatibility`, which keeps the compiled API
+surface at Java 11 as well as the bytecode; a newer compiler with only source/target set
+would accept a post-11 method and fail on a real client. Do not relax that to
+source/target, and do not raise the release level without confirming the Plugin Hub's
+current floor.
+
 The build intentionally excludes `mavenLocal()`; do not add it. A stale local RuneLite module
 can shadow Maven Central and break native dependency resolution.
 
