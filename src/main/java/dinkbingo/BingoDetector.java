@@ -17,6 +17,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -77,6 +78,18 @@ public class BingoDetector {
 
     public void setClaimListener(BiConsumer<ClaimResponse, String> listener) {
         this.claimListener = listener;
+    }
+
+    /**
+     * Invoked with the item name when a submitted claim never produced a usable response, so
+     * the player learns the drop was not recorded. The claim stays unresolved, so a later drop
+     * of the same item is submitted again.
+     */
+    private volatile Consumer<String> claimUnresolvedListener = itemName -> {
+    };
+
+    public void setClaimUnresolvedListener(Consumer<String> listener) {
+        this.claimUnresolvedListener = listener;
     }
 
     public void setBoard(BingoBoard board) {
@@ -184,8 +197,11 @@ public class BingoDetector {
                     return; // plugin reset, logout, or configuration change while request was in flight
                 }
                 if (error != null || response == null) {
-                    // Unresolved: allow a later drop of the same item to try again.
+                    // Unresolved: allow a later drop of the same item to try again. Tell the
+                    // player, because the drop was not recorded and a rare one may need the
+                    // organizer. Never announced -- nothing reached the sheet.
                     log.debug("Bingo claim for {} did not resolve", itemId, error);
+                    claimUnresolvedListener.accept(claim.getItemName());
                     return;
                 }
                 if (response.isResolvedOutcome()) {

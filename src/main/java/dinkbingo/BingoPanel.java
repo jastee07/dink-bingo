@@ -38,8 +38,6 @@ public class BingoPanel extends PluginPanel {
     private static final Color CLAIMED_COLOR = new Color(0x7A, 0x7A, 0x7A);
     private static final Color OPEN_COLOR = Color.WHITE;
 
-    /** Keeps an unrecognized backend reason from pushing the sidebar out of shape. */
-    private static final int MAX_REASON_LENGTH = 80;
 
     private final ItemManager itemManager;
 
@@ -146,50 +144,11 @@ public class BingoPanel extends PluginPanel {
     /**
      * Turns a backend {@code error} value into something an organizer can act on.
      * <p>
-     * An unrecognized value is a custom backend's free text, so it is never rendered raw: it is
-     * prefixed, collapsed to one line, and truncated. The prefix also keeps the reason from
-     * ever starting with {@code <html>}, which Swing would otherwise render as markup, and the
-     * untruncated value is already in the log for anyone who needs the rest of it.
+     * The wording lives in {@link BingoErrors} alongside the claim-failure phrasing for the
+     * same reason, so the two surfaces cannot drift apart.
      */
     static String describeBackendError(@Nullable String backendError) {
-        String error = backendError == null ? "" : backendError.trim();
-        switch (error) {
-            case "":
-                return "Check your connection, then press Refresh";
-            case "bad_token":
-                return "Event token rejected. Check the token on the Config tab.";
-            case "lock_timeout":
-                return "The backend is busy. Press Refresh to try again.";
-            case "bad_json":
-            case "bad_request":
-            case "post_required":
-            case "unknown_action":
-                return "The backend rejected the request. Check the Apps Script deployment.";
-            default:
-                return "Backend error: " + summarize(error);
-        }
-    }
-
-    /** Collapses a backend reason to a single bounded line. */
-    private static String summarize(String error) {
-        StringBuilder out = new StringBuilder(error.length());
-        boolean pendingSpace = false;
-        for (int i = 0; i < error.length(); i++) {
-            char c = error.charAt(i);
-            if (Character.isWhitespace(c) || Character.isISOControl(c)) {
-                pendingSpace = out.length() > 0;
-                continue;
-            }
-            if (out.length() + (pendingSpace ? 2 : 1) > MAX_REASON_LENGTH) {
-                return out.append('\u2026').toString();
-            }
-            if (pendingSpace) {
-                out.append(' ');
-                pendingSpace = false;
-            }
-            out.append(c);
-        }
-        return out.toString();
+        return BingoErrors.describeBoardError(backendError);
     }
 
     private void renderOnEdt(

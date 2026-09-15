@@ -112,6 +112,7 @@ public class BingoPlugin extends Plugin {
         currentBoard = BingoBoard.EMPTY;
         boardLoaded = false;
         detector.setClaimListener(this::onClaimResolved);
+        detector.setClaimUnresolvedListener(this::onClaimUnresolved);
         overlayManager.add(verificationOverlay);
 
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/bingo_icon.png");
@@ -393,8 +394,30 @@ public class BingoPlugin extends Plugin {
             case BingoResponses.NOT_ON_BOARD:
                 return "Bingo: " + item + " is not on the board.";
             default:
-                return "Bingo: claim failed (" + response.getStatus() + ").";
+                // Every backend failure arrives with status "error", so switching on status
+                // alone told the player nothing. The reason is in the error field, and its
+                // wording is shared with the sidebar so the two cannot drift apart.
+                return BingoErrors.describeClaimError(response.getError());
         }
+    }
+
+    /**
+     * No usable response ever arrived for a submitted claim.
+     * <p>
+     * The drop stays unresolved, so a later drop of the same item will try again, but the
+     * player was previously told nothing at all. Deliberately not announced: the sheet never
+     * recorded anything, so there is nothing to put in Discord.
+     */
+    private void onClaimUnresolved(String itemName) {
+        long lifecycle = lifecycleGeneration.get();
+        clientThread.invokeLater(() -> {
+            if (!isCurrent(lifecycle)) {
+                return;
+            }
+            if (config.chatMessageOnClaim()) {
+                sendChatMessage(BingoErrors.describeUnresolvedClaim(itemName));
+            }
+        });
     }
 
     private void sendChatMessage(String message) {

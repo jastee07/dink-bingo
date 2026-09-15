@@ -20,6 +20,8 @@ the normal Dink configuration and capture behavior.
 - `BingoAnnouncer.java`: Dink external-plugin payload; this is the screenshot/Discord boundary.
 - `BingoPanel.java`: sidebar board and refresh control.
 - `BingoConfig.java`: user-facing connection, detection, and announcement settings.
+- `BingoErrors.java`: the one mapping from a backend `error` value to player-facing wording,
+  shared by the sidebar and the claim chat line so the two cannot drift.
 - `BingoResponses.java`, `BingoBoard.java`, `BingoItem.java`, `BoardResult.java`: wire and view models.
 - `src/test/java/dinkbingo/`: focused JUnit/Mockito tests plus the side-loaded client main.
 - `backend/Code.gs`: Apps Script backend and spreadsheet schema.

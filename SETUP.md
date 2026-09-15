@@ -215,11 +215,14 @@ Grimy guam, say), kill something that drops it, and watch the tile close.
 | Panel says "Event token rejected" | The plugin's **Event Token** does not match `token` on the `Config` tab. |
 | Panel says "Backend error: ..." | The backend refused the fetch and named the reason: a missing sheet tab, an `Items` row it cannot read, or a bad `event_start`/`event_end`. The full reason is in the client log. |
 | Panel says "Check your connection" | The request never reached the backend. This one really is network or URL. |
-| Nothing happens on a drop, no chat line | Backend unreachable, or the item id on the board doesn't match the real drop. Check `Audit`. |
+| Nothing happens on a drop, no chat line | The item id on the board doesn't match the real drop, or **Chat message on claim** is off. Check `Audit`. A backend that cannot be reached now says so in chat. |
 | Chat says progress/claimed, nothing in Discord | Dink's *Enable External Plugin Notifications* is off, or no webhook is set. |
 | Every claim fails silently | Deployment is not *Who has access: Anyone*. The client log names this explicitly. |
 | Contribution credited to the wrong team | Use item-level or whole-tile admin unclaim above, then fix the `Teams` tab. |
-| Chat says "claim failed (claim_id_conflict)" | The same claim id was reused for a different RSN or item. The backend refuses to replay another player's outcome. Harmless on its own; report it if it repeats. |
+| Chat says "your event token was rejected" | The plugin's **Event Token** does not match `token` on the `Config` tab. The drop was not recorded; ask the organizer to reclaim it once the token is fixed. |
+| Chat says "the backend stayed busy" | Every retry hit the script lock. Rare outside a heavy drop burst; tell the organizer if it repeats. |
+| Chat says "that claim id was already used" | One claim id was reused for a different drop. The backend refuses to replay another player's outcome. Harmless once; report it if it repeats. |
+| Chat says "couldn't reach the backend" | No response arrived at all, so nothing was recorded. The same item is submitted again if you get another. |
 | Panel says "Backend error: Claims row N ..." | A `Claims` row credits a tile or item that `Items` no longer lists, usually a manual edit or a mid-event rename. The `Leaderboard` tab's **Claims integrity** cell shows the same thing. Restore the tile/option in `Items`, or remove the row with admin unclaim. Board loads and claims both fail until it is fixed. |
 
 ### Screenshot verification overlay
