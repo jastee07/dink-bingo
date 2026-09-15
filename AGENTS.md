@@ -40,6 +40,12 @@ Run from the repository root:
 ./gradlew test
 ```
 
+The Gradle wrapper stays on 8.x. Gradle 9 requires a JVM of 17 or later to run, and the
+Plugin Hub builds this plugin on Java 11, so a 9.x wrapper cannot build here no matter what
+the local JDK is. Dependabot is configured to skip major wrapper bumps for this reason; do
+not raise the wrapper to 9.x, and do not "fix" the resulting failure by bumping CI's JDK,
+which leaves the Plugin Hub build broken while turning CI green.
+
 The build intentionally excludes `mavenLocal()`; do not add it. A stale local RuneLite module
 can shadow Maven Central and break native dependency resolution.
 
