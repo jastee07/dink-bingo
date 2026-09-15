@@ -106,7 +106,8 @@ public class BingoDetector {
         for (ItemStack item : items) {
             // Un-notes, un-placeholders and un-wears so board ids match what actually dropped.
             int canonical = itemManager.canonicalize(item.getId());
-            submitIfClaimable(canonical, Math.max(1, item.getQuantity()), source);
+            // Stack size is deliberately ignored: tiles count distinct item ids, never quantity.
+            submitIfClaimable(canonical, source);
         }
     }
 
@@ -125,7 +126,7 @@ public class BingoDetector {
         for (BingoTile tile : board.getTiles()) {
             for (BingoItem option : tile.getOptions()) {
                 if (option.getName().equalsIgnoreCase(itemName)) {
-                    submitIfClaimable(option.getId(), 1, "Collection log");
+                    submitIfClaimable(option.getId(), "Collection log");
                     return;
                 }
             }
@@ -145,7 +146,7 @@ public class BingoDetector {
             && !resolvedTiles.contains(tile.getId());
     }
 
-    private void submitIfClaimable(int itemId, int quantity, String source) {
+    private void submitIfClaimable(int itemId, String source) {
         if (!shouldSubmit(itemId)) {
             return;
         }
@@ -159,7 +160,6 @@ public class BingoDetector {
         claim.setRsn(getPlayerName());
         claim.setItemId(itemId);
         claim.setItemName(option != null ? option.getName() : String.valueOf(itemId));
-        claim.setQuantity(quantity);
         claim.setSource(source != null ? source : "");
         claim.setClaimId(UUID.randomUUID().toString());
         long claimGeneration = generation.get();
