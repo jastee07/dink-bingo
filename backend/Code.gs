@@ -88,7 +88,7 @@ function handleBoard(params) {
   var member = rosterMember(requireRoster(readRoster()), rsn);
   var team = member ? member.team : null;
   var catalog = readTiles();
-  var claims = readClaims();
+  var claims = readClaims(catalog);
 
   var out = [];
   var remaining = 0;
@@ -170,7 +170,11 @@ function handleClaim(body) {
   }
 
   try {
-    var claims = readClaims();
+    // Validated against Items: a row naming an unknown tile, or crediting an item that tile
+    // never listed, must not advance progress or award points. Fail the claim closed instead
+    // and let the organizer repair the row -- the client keeps retrying a generic error, so
+    // the claim lands once the sheet is fixed.
+    var claims = readClaims(catalog);
 
     // Idempotency first: a retried POST must return the original outcome rather
     // than being treated as a fresh attempt.
@@ -338,6 +342,9 @@ function handleUnclaim(params) {
     SpreadsheetApp.flush();
     var catalog = readTiles();
     var tile = catalog.byTileId[tileMapKey(tileId)];
+    // Deliberately unvalidated. Admin unclaim is how an organizer removes an orphaned or
+    // mistyped contribution, so it has to keep working while other Claims rows still fail
+    // validation. The requested rows are already deleted above; this only recomputes state.
     var claims = readClaims();
     var state = getClaimState(claims, team, tileId);
     auditLocked('ADMIN', requestedItemId, 'unclaimed', params,
@@ -448,7 +455,19 @@ function findOption(tile, itemId) {
   return null;
 }
 
-function readClaims() {
+/**
+ * Read Claims into per-tile contribution state.
+ *
+ * Pass the Items catalog to validate each row against it. Tile completion is decided by
+ * counting contributions, so a Claims row naming a tile that no longer exists, or crediting an
+ * item that tile never listed, would otherwise advance or complete a tile and award points.
+ * Claims is the documented correction surface, so a mistyped manual edit has to fail visibly
+ * rather than quietly change the result.
+ *
+ * Call it without a catalog only for admin cleanup, which must be able to remove exactly the
+ * rows that fail validation.
+ */
+function readClaims(catalog) {
   var values = sheet(SHEET_CLAIMS).getDataRange().getValues();
   var columns = requireColumns(values[0], SHEET_CLAIMS,
     ['team', 'tile_id', 'tile_name', 'item_id', 'item_name', 'rsn', 'claimed_at',
@@ -471,11 +490,37 @@ function readClaims() {
       claimId: String(values[r][columns.claim_id] || ''),
       source: String(values[r][columns.source] || ''),
       progressAfter: parseInt(values[r][columns.progress_after], 10) || 1,
-      completedTile: truthy(values[r][columns.completed_tile])
+      completedTile: truthy(values[r][columns.completed_tile]),
+      row: r + 1
     };
+    if (catalog) validateContribution(catalog, contribution);
     addContribution(claims, contribution);
   }
   return claims;
+}
+
+/**
+ * Check one Claims row against the current Items catalog.
+ *
+ * Only ids are authoritative. tile_name and item_name are historical display text and are
+ * expected to differ after an organizer renames a tile or item, so they are not compared.
+ */
+function validateContribution(catalog, contribution) {
+  var tile = catalog.byTileId[tileMapKey(contribution.tileId)];
+  if (!tile) {
+    throw new Error('Claims row ' + contribution.row + ' credits tile_id "' +
+      contribution.tileId + '", which is not in Items; restore the tile or remove the row');
+  }
+  if (!findOption(tile, contribution.itemId)) {
+    throw new Error('Claims row ' + contribution.row + ' credits item_id ' +
+      contribution.itemId + ' to tile_id "' + contribution.tileId +
+      '", which does not list that item as an option');
+  }
+}
+
+/** Identify a Claims row in an error when the contribution came from the sheet. */
+function claimsRowRef(contribution) {
+  return contribution.row ? ' (Claims row ' + contribution.row + ')' : '';
 }
 
 function addContribution(claims, contribution) {
@@ -487,10 +532,12 @@ function addContribution(claims, contribution) {
   }
   if (state.byItemId[contribution.itemId]) {
     throw new Error('multiple Claims rows for team ' + contribution.team +
-      ', tile_id ' + contribution.tileId + ', item_id ' + contribution.itemId);
+      ', tile_id ' + contribution.tileId + ', item_id ' + contribution.itemId +
+      claimsRowRef(contribution));
   }
   if (contribution.claimId && claims.byClaimId[contribution.claimId]) {
-    throw new Error('claim_id appears more than once: ' + contribution.claimId);
+    throw new Error('claim_id appears more than once: ' + contribution.claimId +
+      claimsRowRef(contribution));
   }
   state.contributions.push(contribution);
   state.byItemId[contribution.itemId] = contribution;
@@ -1097,6 +1144,18 @@ function setupLeaderboard(sh) {
     'IF(points="",1,points),0))))))),"")'
   );
 
+  // The backend refuses board and claim requests while any Claims row fails validation, but
+  // the organizer is looking at this tab, not an HTTP response. Surface the same check here,
+  // pointing at the repair. Ids are authoritative; renamed display text is not a problem.
+  sh.getRange('G4').setValue('Claims integrity');
+  sh.getRange('G5').setFormula(
+    '=IFERROR(LET(invalid,SUMPRODUCT((Claims!A2:A<>"")*' +
+    '(COUNTIFS(Items!A2:A,Claims!B2:B,Items!C2:C,Claims!D2:D)=0)),' +
+    'IF(invalid=0,"OK — every contribution matches an Items option",' +
+    'invalid&" Claims row(s) credit a tile/item pair that is not in Items. ' +
+    'Board and claim requests fail until they are corrected.")),"")'
+  );
+
   sh.getRange('A25:CV1000').clearContent();
   sh.getRange('A25:D25').setValues([['Tile ID', 'Tile', 'Points', 'Required']]);
   sh.getRange('A26').setFormula(
@@ -1125,6 +1184,8 @@ function setupLeaderboard(sh) {
   sh.getRange('A1').setFontSize(16).setFontWeight('bold');
   sh.getRange('A2').setFontColor('#5f6368');
   sh.getRange('A4:E4').setBackground('#f1f3f4').setFontWeight('bold');
+  sh.getRange('G4').setBackground('#f1f3f4').setFontWeight('bold');
+  sh.setColumnWidth(7, 420);
   sh.getRange('A25:CV25').setBackground('#f1f3f4').setFontWeight('bold');
   sh.getRange('B5:E24').setNumberFormat('0');
   sh.setColumnWidth(1, 90);
@@ -1141,5 +1202,11 @@ function setupLeaderboard(sh) {
     .setFontColor('#274e13')
     .setRanges([sh.getRange('E26:CV1000')])
     .build();
-  sh.setConditionalFormatRules([claimedRule]);
+  var integrityRule = SpreadsheetApp.newConditionalFormatRule()
+    .whenTextDoesNotContain('OK —')
+    .setBackground('#fce8e6')
+    .setFontColor('#a50e0e')
+    .setRanges([sh.getRange('G5')])
+    .build();
+  sh.setConditionalFormatRules([claimedRule, integrityRule]);
 }

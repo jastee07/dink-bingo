@@ -823,4 +823,136 @@ assert.strictEqual(lockDepth, 0, "the failed claim released the script lock");
 sheets.Teams = teamsBeforeRosterTests;
 sheets.Claims = claimsBeforeRosterTests;
 
+// ---------------------------------------------------------------------------
+// Claims rows are validated against the Items catalog (#34).
+//
+// Tile completion counts contributions, so a mistyped manual Claims row naming an unrelated
+// item used to advance or complete a tile and award points. Claims is the documented
+// correction surface, so a bad edit has to fail visibly instead of changing the result.
+// ---------------------------------------------------------------------------
+
+const claimsBeforeIntegrity = sheets.Claims.map(row => row.slice());
+const claimRow = (team, tileId, tileName, itemId, itemName, claimId) =>
+  [team, tileId, tileName, itemId, itemName, "Jake", new Date(), claimId, "", 1, true];
+
+// A tile that no longer exists in Items must not silently count or silently vanish.
+sheets.Claims = [claimsBeforeIntegrity[0].slice(),
+  claimRow("Team One", "ghost-tile", "Deleted tile", 4151, "Abyssal whip", "orphan-1")];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake"}),
+  /Claims row 2 credits tile_id "ghost-tile", which is not in Items/,
+  "an unknown tile_id must fail with its Claims row"
+);
+
+// The whip is an option of rare-drop, not of tile 11832. Counting it toward 11832 would
+// complete a tile nobody earned.
+sheets.Claims = [claimsBeforeIntegrity[0].slice(),
+  claimRow("Team One", "11832", "Bandos chestplate", 4151, "Abyssal whip", "wrong-tile-1")];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake"}),
+  /Claims row 2 credits item_id 4151 to tile_id "11832", which does not list that item/,
+  "an item credited to the wrong tile must fail with its Claims row"
+);
+
+// New claims fail closed while Claims integrity is invalid rather than counting the bad row.
+const claimsLengthWhileInvalid = sheets.Claims.length;
+assert.throws(
+  () => context.handleClaim({
+    token: "participant-secret",
+    rsn: "Jake",
+    itemId: 21034,
+    itemName: "Dexterous prayer scroll",
+    claimId: "while-invalid-1"
+  }),
+  /Claims row 2 credits item_id 4151/,
+  "a new claim must not be evaluated against invalid Claims state"
+);
+assert.strictEqual(
+  sheets.Claims.length,
+  claimsLengthWhileInvalid,
+  "the failed claim wrote nothing"
+);
+assert.strictEqual(lockDepth, 0, "the failed claim released the script lock");
+
+// Admin unclaim is how the organizer repairs this, so it must keep working while the rows it
+// is being asked to remove are exactly the ones failing validation.
+const repaired = output(context.handleUnclaim({
+  admin_token: "organizer-secret",
+  team: "Team One",
+  tile_id: "11832"
+}));
+assert.strictEqual(repaired.status, "unclaimed");
+assert.strictEqual(repaired.removed, 1);
+assert.strictEqual(
+  sheets.Claims.length,
+  1,
+  "admin unclaim removed the invalid contribution"
+);
+const boardAfterRepair = output(context.handleBoard({token: "participant-secret", rsn: "Jake"}));
+assert.strictEqual(
+  boardAfterRepair.status,
+  "ok",
+  "the board recovers once the invalid row is removed"
+);
+
+// An orphaned row whose tile is gone from Items is removable the same way.
+sheets.Claims = [claimsBeforeIntegrity[0].slice(),
+  claimRow("Team One", "ghost-tile", "Deleted tile", 4151, "Abyssal whip", "orphan-2")];
+const orphanRemoved = output(context.handleUnclaim({
+  admin_token: "organizer-secret",
+  team: "Team One",
+  tile_id: "ghost-tile"
+}));
+assert.strictEqual(orphanRemoved.status, "unclaimed");
+assert.strictEqual(orphanRemoved.removed, 1);
+assert.strictEqual(sheets.Claims.length, 1, "the orphaned row is gone");
+
+// Ids are authoritative; display text is historical. Renaming a tile or item in Items must
+// not invalidate the claims already recorded under the old names.
+sheets.Claims = [claimsBeforeIntegrity[0].slice(),
+  claimRow("Team One", "rare-drop", "Any rare drop (old name)", 4151,
+    "Abyssal whip (old name)", "renamed-1")];
+const renamedBoard = output(context.handleBoard({token: "participant-secret", rsn: "Jake"}));
+assert.strictEqual(renamedBoard.status, "ok", "renamed display text is not an integrity error");
+const renamedTile = renamedBoard.tiles.find(tile => tile.id === "rare-drop");
+assert.strictEqual(renamedTile.claimed, true);
+assert.strictEqual(
+  renamedTile.claimedItem.name,
+  "Abyssal whip (old name)",
+  "the historical name recorded at claim time is preserved"
+);
+
+// Structural duplicates still fail, and now say which row.
+sheets.Claims = [claimsBeforeIntegrity[0].slice(),
+  claimRow("Team One", "rare-drop", "Any rare drop", 4151, "Abyssal whip", "dupe-a"),
+  claimRow("Team One", "rare-drop", "Any rare drop", 4151, "Abyssal whip", "dupe-b")];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake"}),
+  /multiple Claims rows for team Team One, tile_id rare-drop, item_id 4151 \(Claims row 3\)/,
+  "a duplicate contribution names the offending row"
+);
+
+sheets.Claims = [claimsBeforeIntegrity[0].slice(),
+  claimRow("Team One", "rare-drop", "Any rare drop", 4151, "Abyssal whip", "same-id"),
+  claimRow("Team One", "11832", "Bandos chestplate", 11832, "Bandos chestplate", "same-id")];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake"}),
+  /claim_id appears more than once: same-id \(Claims row 3\)/,
+  "a duplicate claim_id names the offending row"
+);
+
+sheets.Claims = claimsBeforeIntegrity;
+
+// The organizer looks at the Leaderboard, not at an HTTP response, so the same check is
+// surfaced there.
+const integrityFormula = generatedFormula("G5");
+assert(
+  integrityFormula.includes("COUNTIFS(Items!A2:A,Claims!B2:B,Items!C2:C,Claims!D2:D)=0"),
+  "the leaderboard must flag Claims rows whose tile/item pair is absent from Items"
+);
+assert(
+  integrityFormula.includes("Claims!A2:A<>"),
+  "blank Claims padding rows must not be reported as invalid"
+);
+
 console.log("Apps Script grouped-tile and security tests passed");

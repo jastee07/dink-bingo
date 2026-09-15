@@ -206,6 +206,38 @@ Before raising `required_count` on a previously used tile, verify the existing c
 rows represent distinct item ids and reconcile any legacy conflicts. Always keep the same
 required count on every option row.
 
+### Repairing invalid Claims rows
+
+`Claims` is the correction surface, so it is also where a mistyped edit does damage. Tile
+completion is decided by counting contributions, which means a row crediting an unrelated item
+would otherwise complete a tile and award points that nobody earned.
+
+Every board and claim request now validates `Claims` against `Items` and fails with the
+offending row number rather than counting it:
+
+- `Claims row 7 credits tile_id "..." , which is not in Items` — the tile was renamed or
+  deleted in `Items` while its contributions remained.
+- `Claims row 7 credits item_id 4151 to tile_id "...", which does not list that item as an
+  option` — the item belongs to a different tile, or was removed from this tile's options.
+- `multiple Claims rows for team ... (Claims row 7)` — the same item is credited twice to one
+  team and tile.
+- `claim_id appears more than once: ... (Claims row 7)` — a copied row kept its claim id.
+
+Only ids are checked. `tile_name` and `item_name` are historical display text and are expected
+to differ once you rename something; old claims keep the name recorded when they were made.
+
+While any row is invalid the event is effectively frozen: board loads and new claims both
+fail. Repair it one of two ways:
+
+- Restore the missing tile or option in `Items`, if the row is legitimate and `Items` is what
+  changed. This is usually right when you renamed or reorganized tiles mid-event.
+- Remove the contribution with an admin `unclaim` (see the smoke tests above), which works
+  even while other rows fail validation and is the supported way to delete an orphan.
+
+The `Leaderboard` tab shows the same check in **Claims integrity** next to the team table, so
+you can spot the problem without reading an error response. Players see the reason in the
+sidebar, and the plugin keeps retrying, so a claim in flight during the repair still lands.
+
 ## Trust model
 
 The player `token` is a shared event credential. Every participant needs it, so it stops

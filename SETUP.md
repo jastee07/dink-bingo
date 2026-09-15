@@ -219,6 +219,7 @@ Grimy guam, say), kill something that drops it, and watch the tile close.
 | Chat says progress/claimed, nothing in Discord | Dink's *Enable External Plugin Notifications* is off, or no webhook is set. |
 | Every claim fails silently | Deployment is not *Who has access: Anyone*. The client log names this explicitly. |
 | Contribution credited to the wrong team | Use item-level or whole-tile admin unclaim above, then fix the `Teams` tab. |
+| Panel says "Backend error: Claims row N ..." | A `Claims` row credits a tile or item that `Items` no longer lists, usually a manual edit or a mid-event rename. The `Leaderboard` tab's **Claims integrity** cell shows the same thing. Restore the tile/option in `Items`, or remove the row with admin unclaim. Board loads and claims both fail until it is fixed. |
 
 ### Screenshot verification overlay
 
