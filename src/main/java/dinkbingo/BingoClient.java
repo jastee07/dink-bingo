@@ -52,6 +52,12 @@ public class BingoClient {
     private final ScheduledExecutorService executor;
     private final BingoConfig config;
 
+    /**
+     * Last parse of {@link BingoConfig#backendUrl()}, keyed by the raw value it was parsed
+     * from so a changed setting invalidates it without anyone having to say so.
+     */
+    private volatile ParsedUrl parsed = ParsedUrl.UNPARSED;
+
     @Inject
     public BingoClient(OkHttpClient httpClient, Gson gson, ScheduledExecutorService executor, BingoConfig config) {
         this.httpClient = httpClient;
@@ -62,7 +68,7 @@ public class BingoClient {
 
     /** Whether the user has pointed us at a backend. Until then we make no requests at all. */
     public boolean isConfigured() {
-        return !config.backendUrl().trim().isEmpty() && parseUrl() != null;
+        return parseUrl() != null;
     }
 
     public CompletableFuture<BoardResult> fetchBoard(String rsn) {
@@ -145,8 +151,28 @@ public class BingoClient {
     // internals
     // ------------------------------------------------------------------
 
+    /**
+     * The configured backend URL, or {@code null} when it is unset or unusable.
+     * <p>
+     * {@code BingoDetector} asks whether we are configured for every game message, on the
+     * client thread, so the parse is cached against the raw setting it came from: an unchanged
+     * setting costs a string compare, and a rejected one is logged once rather than once per
+     * chat line.
+     */
     private HttpUrl parseUrl() {
-        HttpUrl url = HttpUrl.parse(config.backendUrl().trim());
+        String raw = config.backendUrl();
+        raw = raw == null ? "" : raw.trim();
+        ParsedUrl cached = parsed;
+        if (raw.equals(cached.raw)) {
+            return cached.url;
+        }
+        ParsedUrl fresh = new ParsedUrl(raw, validate(raw));
+        parsed = fresh;
+        return fresh.url;
+    }
+
+    private static HttpUrl validate(String raw) {
+        HttpUrl url = HttpUrl.parse(raw);
         if (url == null) {
             return null;
         }
@@ -288,6 +314,21 @@ public class BingoClient {
         } catch (RejectedExecutionException e) {
             log.debug("Bingo request dropped because the executor is shutting down");
             future.complete(null);
+        }
+    }
+
+    /** An immutable parse result paired with the raw setting that produced it. */
+    private static final class ParsedUrl {
+
+        /** Matches no configured value, so the first lookup always parses. */
+        static final ParsedUrl UNPARSED = new ParsedUrl(null, null);
+
+        final String raw;
+        final HttpUrl url;
+
+        ParsedUrl(String raw, HttpUrl url) {
+            this.raw = raw;
+            this.url = url;
         }
     }
 }

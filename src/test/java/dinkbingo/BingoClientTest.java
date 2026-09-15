@@ -1,5 +1,9 @@
 package dinkbingo;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -14,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
@@ -80,6 +85,66 @@ class BingoClientTest {
     void rejectsPlainHttpExceptForLoopbackDevelopmentServers() {
         when(config.backendUrl()).thenReturn("http://example.com/exec");
         assertFalse(client.isConfigured());
+    }
+
+    @Test
+    void acceptsALoopbackDevelopmentServerOverPlainHttp() {
+        when(config.backendUrl()).thenReturn("http://localhost:8080/exec");
+        assertTrue(client.isConfigured());
+    }
+
+    /**
+     * {@code BingoDetector} asks this for every game message, so a rejected URL must not warn
+     * once per chat line: the flood buries the one message that would explain the problem.
+     */
+    @Test
+    void warnsOnceForARejectedUrlRatherThanOncePerCall() {
+        ListAppender<ILoggingEvent> logs = captureLogs();
+        try {
+            when(config.backendUrl()).thenReturn("http://example.com/exec");
+            for (int i = 0; i < 25; i++) {
+                assertFalse(client.isConfigured());
+            }
+            assertEquals(1, httpsWarnings(logs));
+
+            // A different bad value is a different mistake, so it is worth its own warning.
+            when(config.backendUrl()).thenReturn("http://other.example.com/exec");
+            assertFalse(client.isConfigured());
+            assertEquals(2, httpsWarnings(logs));
+        } finally {
+            releaseLogs(logs);
+        }
+    }
+
+    @Test
+    void picksUpAChangedBackendUrl() {
+        when(config.backendUrl()).thenReturn("http://example.com/exec");
+        assertFalse(client.isConfigured());
+
+        when(config.backendUrl()).thenReturn("https://example.com/exec");
+        assertTrue(client.isConfigured());
+
+        when(config.backendUrl()).thenReturn("");
+        assertFalse(client.isConfigured());
+    }
+
+    /** The cached parse is keyed by the raw setting, so surrounding whitespace still matches. */
+    @Test
+    void sendsRequestsToAUrlThatChangedAfterTheFirstParse() throws Exception {
+        assertTrue(client.isConfigured());
+
+        MockWebServer moved = new MockWebServer();
+        moved.start();
+        try {
+            when(config.backendUrl()).thenReturn("  " + moved.url("/exec") + "  ");
+            moved.enqueue(json("{\"status\":\"claimed\",\"itemId\":4151,\"remaining\":1}"));
+
+            assertTrue(client.submitClaim(claim()).get(5, TimeUnit.SECONDS).isClaimed());
+            assertEquals(0, server.getRequestCount());
+            assertEquals(1, moved.getRequestCount());
+        } finally {
+            moved.shutdown();
+        }
     }
 
     @Test
@@ -335,6 +400,25 @@ class BingoClientTest {
     }
 
     // ------------------------------------------------------------------
+
+    private static ListAppender<ILoggingEvent> captureLogs() {
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        ((Logger) LoggerFactory.getLogger(BingoClient.class)).addAppender(appender);
+        return appender;
+    }
+
+    private static void releaseLogs(ListAppender<ILoggingEvent> appender) {
+        ((Logger) LoggerFactory.getLogger(BingoClient.class)).detachAppender(appender);
+        appender.stop();
+    }
+
+    private static long httpsWarnings(ListAppender<ILoggingEvent> appender) {
+        return appender.list.stream()
+            .filter(event -> event.getLevel() == Level.WARN)
+            .filter(event -> event.getFormattedMessage().contains("must use HTTPS"))
+            .count();
+    }
 
     private static ClaimRequest claim() {
         ClaimRequest claim = new ClaimRequest();
