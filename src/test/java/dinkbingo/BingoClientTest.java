@@ -17,6 +17,7 @@ import org.mockito.MockitoAnnotations;
 
 import java.io.IOException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
@@ -25,6 +26,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class BingoClientTest {
@@ -241,6 +246,36 @@ class BingoClientTest {
         when(config.backendUrl()).thenReturn("");
         assertEquals(BingoBoard.EMPTY.getTiles(), client.fetchBoard("Jake").get(5, TimeUnit.SECONDS).getTiles());
         assertEquals(0, server.getRequestCount());
+    }
+
+    /**
+     * RuneLite shuts its shared executor down at client exit. A rejection must surface as a
+     * completed future rather than escaping to the caller, or {@code BingoDetector} never
+     * clears its in-flight marker for the item.
+     */
+    @Test
+    void completesTheFutureWhenTheExecutorRejectsTheFirstAttempt() throws Exception {
+        executor.shutdownNow();
+
+        assertNull(client.submitClaim(claim()).get(5, TimeUnit.SECONDS));
+        assertEquals(0, server.getRequestCount());
+    }
+
+    @Test
+    void completesTheFutureWhenTheExecutorRejectsARetry() throws Exception {
+        ScheduledExecutorService rejectsRetries = mock(ScheduledExecutorService.class);
+        doAnswer(invocation -> {
+            invocation.getArgument(0, Runnable.class).run();
+            return null;
+        }).when(rejectsRetries).execute(any(Runnable.class));
+        when(rejectsRetries.schedule(any(Runnable.class), anyLong(), any(TimeUnit.class)))
+            .thenThrow(new RejectedExecutionException("executor shutting down"));
+
+        BingoClient shuttingDown = new BingoClient(new OkHttpClient(), new Gson(), rejectsRetries, config);
+        server.enqueue(new MockResponse().setResponseCode(500));
+
+        assertNull(shuttingDown.submitClaim(claim()).get(5, TimeUnit.SECONDS));
+        assertEquals(1, server.getRequestCount());
     }
 
     // ------------------------------------------------------------------

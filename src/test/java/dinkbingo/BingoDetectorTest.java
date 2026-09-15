@@ -17,6 +17,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.RejectedExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -352,6 +353,20 @@ class BingoDetectorTest {
         oldClaim.complete(response(BingoResponses.CLAIMED));
 
         assertTrue(seen.isEmpty());
+    }
+
+    @Test
+    void aClaimThatCannotBeSubmittedDoesNotPinTheItemInFlight() {
+        // The executor rejects new work once RuneLite is shutting down; the rejection must not
+        // leave the item marked in flight, because nothing would ever clear it.
+        when(bingoClient.submitClaim(any()))
+            .thenThrow(new RejectedExecutionException("executor shutting down"))
+            .thenReturn(CompletableFuture.completedFuture(response(BingoResponses.CLAIMED)));
+
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+
+        verify(bingoClient, times(2)).submitClaim(any());
     }
 
     // ------------------------------------------------------------------
