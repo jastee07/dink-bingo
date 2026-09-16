@@ -68,6 +68,11 @@ Existing sheets must follow the
    Webhook Override*, or this plugin's own *Bingo Webhook Override*).
 3. In Bingo with Dink Notifications: paste the **Backend URL** and **Event Token**.
 
+The sidebar shows when the board last loaded, so a board that has quietly stopped refreshing
+does not look identical to a current one. `Updated 14:32` means it is live, `Refreshing…` that
+a fetch is running, and `Last updated 14:32 — refresh failed` that the rows are the last good
+board. An explicit refusal from the backend also stops claim detection and says so.
+
 That's it — the player's RSN is matched against the `Teams` tab, so nobody has to pick their
 own team in config. The sidebar keeps the team summary and Refresh button visible while long
 tile lists scroll underneath them.
@@ -186,8 +191,8 @@ participant. The mitigations are visibility and reversibility:
 - No RuneLite account hash is collected.
 - `Audit` stores only allowlisted operational fields; tokens and webhook URLs are redacted.
 - `admin_token` is organizer-only and enables item-level or whole-tile unclaim.
-- A backend `discord_webhook` remains in the organizer-owned Sheet and is never returned by
-  the API. A player's Dink webhook remains in their secret RuneLite configuration.
+- The backend holds no webhook and makes no outbound requests; a player's Dink webhook
+  remains in their own secret RuneLite configuration.
 
 For a friendly clan event this is the right trade-off. If you need more, move the backend off
 Apps Script and issue per-player tokens.

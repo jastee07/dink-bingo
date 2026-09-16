@@ -2,6 +2,7 @@ package dinkbingo;
 
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
+import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.Player;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.chat.ChatMessageManager;
@@ -19,6 +20,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
@@ -179,9 +181,15 @@ class BingoPluginLifecycleTest {
         verify(panel, never()).renderLoadError();
     }
 
-    /** A later failure must not replace a board the player can still read. */
+    /**
+     * A later failure must not replace a board the player can still read, but an explicit
+     * refusal must not let that board keep looking current either. An organizer rotating the
+     * event token mid-event is the common way to reach this: the old board stays on screen,
+     * every drop is submitted against it, and every claim is rejected with the reason hidden
+     * because an earlier refresh had succeeded.
+     */
     @Test
-    void aBackendRejectionAfterASuccessfulLoadLeavesTheBoardOnScreen() throws Exception {
+    void aBackendRejectionAfterASuccessfulLoadStopsClaimingAndLabelsTheBoard() throws Exception {
         BingoBoard board = board("Current Team");
         when(bingoClient.fetchBoard("Jake")).thenReturn(
             CompletableFuture.completedFuture(BoardResult.of(board)),
@@ -191,8 +199,187 @@ class BingoPluginLifecycleTest {
         plugin.refreshBoard();
 
         verify(panel).render(board, true, BoardView.NAMED_TILES, false);
+        verify(detector).setDetectionEnabled(false);
+        verify(panel).renderStale(board, true, BoardView.NAMED_TILES, false, "bad_token");
+        // The board is not replaced by an error screen; the rows stay as reference.
         verify(panel, never()).renderLoadError(anyString());
         verify(panel, never()).renderLoadError();
+    }
+
+    /**
+     * A failed round trip is not evidence the backend has refused this client, so the board
+     * stays usable and drops keep being submitted. This is the case a brief outage produces,
+     * and suspending detection for it would lose real claims.
+     */
+    @Test
+    void aTransportFailureAfterASuccessfulLoadKeepsClaiming() throws Exception {
+        BingoBoard board = board("Current Team");
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board)),
+            CompletableFuture.completedFuture(BoardResult.unreachable()));
+
+        plugin.startUp();
+        plugin.refreshBoard();
+
+        verify(detector, never()).setDetectionEnabled(false);
+        verify(panel, never()).renderStale(any(), anyBoolean(), any(), anyBoolean(), anyString());
+        verify(panel, never()).renderLoadError();
+    }
+
+    /** Recovery is ordinary: the next good board replaces the warning and resumes claiming. */
+    @Test
+    void aSuccessfulRefreshAfterARejectionRestoresTheBoard() throws Exception {
+        BingoBoard first = board("Current Team");
+        BingoBoard recovered = board("Recovered Team");
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(first)),
+            CompletableFuture.completedFuture(BoardResult.rejected("bad_token")),
+            CompletableFuture.completedFuture(BoardResult.of(recovered)));
+
+        plugin.startUp();
+        plugin.refreshBoard();
+        plugin.refreshBoard();
+
+        // setBoard is what lifts the suspension, so the detector is handed the new board.
+        verify(detector).setBoard(recovered);
+        verify(panel).render(recovered, true, BoardView.NAMED_TILES, false);
+    }
+
+    /**
+     * A rejection on the very first load has no board to keep, so it stays an error screen
+     * rather than becoming a stale one.
+     */
+    @Test
+    void aRejectionBeforeAnyBoardLoadsStillShowsTheErrorScreen() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.rejected("bad_token")));
+
+        plugin.startUp();
+
+        verify(detector).setDetectionEnabled(false);
+        verify(panel).renderLoadError("bad_token");
+        verify(panel, never()).renderStale(any(), anyBoolean(), any(), anyBoolean(), anyString());
+    }
+
+    // ------------------------------------------------------------------
+    // last-refresh visibility (#41)
+    // ------------------------------------------------------------------
+
+    @Test
+    void aSuccessfulRefreshRecordsItsCompletionTime() throws Exception {
+        BingoBoard board = board("Current Team");
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board)));
+
+        plugin.startUp();
+
+        verify(panel).markRefreshing();
+        verify(panel).markRefreshSucceeded();
+        verify(panel, never()).markRefreshFailed();
+    }
+
+    /**
+     * A refresh that fails after an earlier success leaves the rows alone but must stop
+     * presenting them as confirmed current.
+     */
+    @Test
+    void aFailedRefreshMarksTheBoardStaleWithoutReplacingIt() throws Exception {
+        BingoBoard board = board("Current Team");
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board)),
+            CompletableFuture.completedFuture(BoardResult.unreachable()));
+
+        plugin.startUp();
+        plugin.refreshBoard();
+
+        verify(panel).markRefreshFailed();
+        // The board is not replaced by an error screen, and claiming continues.
+        verify(panel, never()).renderLoadError();
+        verify(detector, never()).setDetectionEnabled(false);
+    }
+
+    @Test
+    void recoveryAfterAFailedRefreshRecordsANewTime() throws Exception {
+        BingoBoard board = board("Current Team");
+        BingoBoard recovered = board("Recovered Team");
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board)),
+            CompletableFuture.completedFuture(BoardResult.unreachable()),
+            CompletableFuture.completedFuture(BoardResult.of(recovered)));
+
+        plugin.startUp();
+        plugin.refreshBoard();
+        plugin.refreshBoard();
+
+        verify(panel, times(2)).markRefreshSucceeded();
+        verify(panel).markRefreshFailed();
+    }
+
+    /**
+     * A response from a superseded request must not move the timestamp forward, or the panel
+     * would report a board the player is not looking at as the current one.
+     */
+    @Test
+    void aStaleCompletionDoesNotRecordARefreshTime() throws Exception {
+        CompletableFuture<BoardResult> first = new CompletableFuture<>();
+        CompletableFuture<BoardResult> second = new CompletableFuture<>();
+        when(bingoClient.fetchBoard("Jake")).thenReturn(first, second);
+        BingoBoard stale = board("Stale Team");
+        BingoBoard current = board("Current Team");
+
+        plugin.startUp();
+        plugin.refreshBoard();
+
+        first.complete(BoardResult.of(stale));
+        second.complete(BoardResult.of(current));
+
+        verify(panel, never()).render(stale, true, BoardView.NAMED_TILES, false);
+        verify(panel).render(current, true, BoardView.NAMED_TILES, false);
+        // Only the board that actually reached the panel records a time. The superseded
+        // response records nothing, so the line cannot describe a board nobody is looking at.
+        verify(panel, times(1)).markRefreshSucceeded();
+    }
+
+    @Test
+    void aCompletionAfterShutdownRecordsNothing() throws Exception {
+        CompletableFuture<BoardResult> pending = new CompletableFuture<>();
+        when(bingoClient.fetchBoard("Jake")).thenReturn(pending);
+
+        plugin.startUp();
+        plugin.shutDown();
+        pending.complete(BoardResult.of(board("Current Team")));
+
+        verify(panel, never()).markRefreshSucceeded();
+        // The panel outlives the plugin, so a leftover timestamp would describe an old run.
+        verify(panel).resetFreshness();
+    }
+
+    /** Pressing Refresh while one is in flight must not start a second request. */
+    @Test
+    void anOverlappingManualRefreshDoesNotStartASecondRequest() throws Exception {
+        CompletableFuture<BoardResult> pending = new CompletableFuture<>();
+        when(bingoClient.fetchBoard("Jake")).thenReturn(pending);
+
+        plugin.startUp();
+        plugin.refreshBoard();
+        plugin.refreshBoard();
+
+        verify(bingoClient, times(1)).fetchBoard("Jake");
+        verify(panel, times(1)).markRefreshing();
+    }
+
+    @Test
+    void logoutForgetsHowFreshTheBoardWas() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Current Team"))));
+
+        plugin.startUp();
+
+        GameStateChanged loggedOut = new GameStateChanged();
+        loggedOut.setGameState(GameState.LOGIN_SCREEN);
+        plugin.onGameStateChanged(loggedOut);
+
+        verify(panel).resetFreshness();
     }
 
     private void inject(String name, Object value) throws Exception {

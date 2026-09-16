@@ -20,6 +20,8 @@ the normal Dink configuration and capture behavior.
 - `BingoAnnouncer.java`: Dink external-plugin payload; this is the screenshot/Discord boundary.
 - `BingoPanel.java`: sidebar board and refresh control.
 - `BingoConfig.java`: user-facing connection, detection, and announcement settings.
+- `BingoErrors.java`: the one mapping from a backend `error` value to player-facing wording,
+  shared by the sidebar and the claim chat line so the two cannot drift.
 - `BingoResponses.java`, `BingoBoard.java`, `BingoItem.java`, `BoardResult.java`: wire and view models.
 - `src/test/java/dinkbingo/`: focused JUnit/Mockito tests plus the side-loaded client main.
 - `backend/Code.gs`: Apps Script backend and spreadsheet schema.
@@ -91,8 +93,8 @@ Before making the test claim:
 
 The curl examples in `backend/README.md` are not read-only except `ping` and `board`.
 Claim, replay, concurrency, and unclaim requests mutate the deployed sheet and may trigger a
-backend Discord post when `announce_from_backend=true`. Do not run them against a live event
-without explicit authorization and a reversible test tile/team.
+live event's Claims and Audit rows. Do not run them against a live event without explicit
+authorization and a reversible test tile/team.
 
 ## Invariants to preserve
 
@@ -100,9 +102,14 @@ without explicit authorization and a reversible test tile/team.
   `duplicate`, `not_on_team`, `not_on_board`, `event_closed`, or errors. A replay returned
   to the original in-flight client operation is announced because the earlier HTTP response was
   lost and therefore never reached Dink.
-- Reuse the same `claimId` across retries.
+- Reuse the same `claimId` across retries. One `claimId` names one logical operation, and its
+  outcome must not change between attempts: accepted contributions replay from `Claims`,
+  terminal rejections from `Attempts`.
 - Keep Apps Script mutations under `LockService.getScriptLock()`.
-- Never store event tokens, admin tokens, webhook URLs, or account hashes in Claims or Audit.
+- Never store event tokens, admin tokens, webhook URLs, or account hashes in Claims, Attempts,
+  or Audit.
+- Never call `UrlFetchApp` from the backend. Announcements belong to the client, which is the
+  only side that can screenshot the drop.
 - Canonicalize item IDs before matching.
 - Preserve the raw RuneLite loot-event paths and per-item dedupe; Dink's own loot thresholds
   must not control bingo detection.

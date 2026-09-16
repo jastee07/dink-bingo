@@ -10,6 +10,9 @@ import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
 import java.awt.Component;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -23,6 +26,136 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class BingoPanelTest {
+
+    /**
+     * During an event a board that stopped refreshing looks exactly like one that is current,
+     * which is the difference between trusting the tile list and reloading the client.
+     */
+    @Test
+    void freshnessLineReportsEachRefreshOutcome() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        panel.setClock(Clock.fixed(Instant.parse("2026-09-15T14:32:00Z"), ZoneOffset.UTC));
+
+        BingoBoard board = new BingoBoard("Team One", tiles(), true);
+
+        // Nothing has loaded yet, so there is nothing to describe.
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        assertEquals("", panel.freshnessText());
+
+        panel.markRefreshing();
+        assertEquals("Refreshing\u2026", panel.freshnessText());
+
+        panel.markRefreshSucceeded();
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        String updated = panel.freshnessText();
+        assertTrue(updated.startsWith("Updated "), updated);
+
+        // A failed round trip keeps the rows and the time they were last confirmed.
+        panel.markRefreshFailed();
+        String failed = panel.freshnessText();
+        assertTrue(failed.startsWith("Last updated "), failed);
+        assertTrue(failed.endsWith("refresh failed"), failed);
+        assertEquals(updated.substring("Updated ".length()),
+            failed.substring("Last updated ".length(), failed.indexOf(" \u2014")),
+            "a failed refresh must not move the last-success time");
+
+        // Recovery clears the warning.
+        panel.markRefreshSucceeded();
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        assertEquals(updated, panel.freshnessText());
+    }
+
+    /**
+     * The board is also re-rendered when the player switches view or hides completed tiles.
+     * Those are not refreshes, and stamping them as one would report a board as current when
+     * nothing was fetched.
+     */
+    @Test
+    void reRenderingForAViewChangeDoesNotLookLikeARefresh() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        panel.setClock(Clock.fixed(Instant.parse("2026-09-15T14:32:00Z"), ZoneOffset.UTC));
+        BingoBoard board = new BingoBoard("Team One", tiles(), true);
+
+        panel.markRefreshSucceeded();
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        String afterRefresh = panel.freshnessText();
+
+        panel.setClock(Clock.fixed(Instant.parse("2026-09-15T18:00:00Z"), ZoneOffset.UTC));
+        panel.render(board, true, BoardView.POSSIBLE_ITEMS, true);
+        flush();
+
+        assertEquals(afterRefresh, panel.freshnessText(),
+            "switching view must not restamp the board as freshly fetched");
+    }
+
+    /** A rejection keeps the rows but must not let them read as current. */
+    @Test
+    void aRejectedRefreshLabelsTheBoardAndKeepsItsAge() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        panel.setClock(Clock.fixed(Instant.parse("2026-09-15T14:32:00Z"), ZoneOffset.UTC));
+        BingoBoard board = new BingoBoard("Team One", tiles(), true);
+
+        panel.markRefreshSucceeded();
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        flush();
+
+        panel.renderStale(board, true, BoardView.NAMED_TILES, false, "bad_token");
+        assertTrue(panel.freshnessText().startsWith("Last updated "), panel.freshnessText());
+
+        // Re-rendering while rejected keeps the warning rather than quietly going live again.
+        panel.render(board, true, BoardView.POSSIBLE_ITEMS, false);
+        assertTrue(panel.freshnessText().startsWith("Last updated "), panel.freshnessText());
+    }
+
+    /** Logout, a token change, or a plugin restart makes the previous board's age meaningless. */
+    @Test
+    void resetClearsTheFreshnessLine() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        BingoBoard board = new BingoBoard("Team One", tiles(), true);
+
+        panel.markRefreshSucceeded();
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        assertFalse(panel.freshnessText().isEmpty());
+
+        panel.resetFreshness();
+        assertEquals("", panel.freshnessText());
+    }
+
+    /** A message screen has no rows, so there is nothing for a freshness line to describe. */
+    @Test
+    void messageScreensHideTheFreshnessLine() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        BingoBoard board = new BingoBoard("Team One", tiles(), true);
+
+        panel.markRefreshSucceeded();
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        assertFalse(panel.freshnessText().isEmpty());
+
+        panel.renderLoading();
+        assertEquals("", panel.freshnessText());
+    }
+
+    private static List<BingoTile> tiles() {
+        return Collections.singletonList(new BingoTile("4151", "Abyssal whip", 1, 1, 0,
+            Collections.singletonList(new BingoItem(4151, "Abyssal whip")),
+            Collections.emptyList(), false, null, null, null));
+    }
+
+    private static void flush() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+        });
+    }
+
 
     @Test
     void longTileListScrollsWhileHeaderRemainsFixed() throws Exception {

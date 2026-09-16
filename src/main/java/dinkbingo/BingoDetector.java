@@ -17,6 +17,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -79,7 +80,42 @@ public class BingoDetector {
         this.claimListener = listener;
     }
 
+    /**
+     * Invoked with the item name when a submitted claim never produced a usable response, so
+     * the player learns the drop was not recorded. The claim stays unresolved, so a later drop
+     * of the same item is submitted again.
+     */
+    private volatile Consumer<String> claimUnresolvedListener = itemName -> {
+    };
+
+    public void setClaimUnresolvedListener(Consumer<String> listener) {
+        this.claimUnresolvedListener = listener;
+    }
+
+    /**
+     * When false, no drop is submitted even though the last known board is still held.
+     * <p>
+     * Set after the backend explicitly refuses a request. The board stays on screen as
+     * reference, but the backend has already said it will not honour this client, so
+     * submitting against that snapshot only produces rejections the player cannot act on.
+     * A transport failure is different and deliberately leaves detection alone: the board is
+     * probably still correct and the next drop may well get through.
+     */
+    private volatile boolean detectionEnabled = true;
+
+    public void setDetectionEnabled(boolean enabled) {
+        this.detectionEnabled = enabled;
+    }
+
+    public boolean isDetectionEnabled() {
+        return detectionEnabled;
+    }
+
     public void setBoard(BingoBoard board) {
+        // A board that loaded is proof the backend is answering this client again, so any
+        // suspension from an earlier refusal is lifted here rather than at a separate call
+        // site that could be forgotten.
+        this.detectionEnabled = true;
         this.board = board;
         // The sheet is authoritative. If an organizer unclaimed a tile, allow this client
         // to submit it again instead of retaining the session-local resolved marker.
@@ -88,6 +124,7 @@ public class BingoDetector {
     }
 
     public void reset() {
+        this.detectionEnabled = true;
         this.generation.incrementAndGet();
         this.board = BingoBoard.EMPTY;
         this.inFlight.clear();
@@ -139,7 +176,8 @@ public class BingoDetector {
 
     boolean shouldSubmit(int itemId) {
         BingoTile tile = board.getByItemId().get(itemId);
-        return board.isClaimable(itemId)
+        return detectionEnabled
+            && board.isClaimable(itemId)
             && tile != null
             && !inFlight.contains(itemId)
             && !resolvedItems.contains(itemId)
@@ -184,8 +222,11 @@ public class BingoDetector {
                     return; // plugin reset, logout, or configuration change while request was in flight
                 }
                 if (error != null || response == null) {
-                    // Unresolved: allow a later drop of the same item to try again.
+                    // Unresolved: allow a later drop of the same item to try again. Tell the
+                    // player, because the drop was not recorded and a rare one may need the
+                    // organizer. Never announced -- nothing reached the sheet.
                     log.debug("Bingo claim for {} did not resolve", itemId, error);
+                    claimUnresolvedListener.accept(claim.getItemName());
                     return;
                 }
                 if (response.isResolvedOutcome()) {

@@ -12,7 +12,7 @@ config. Total player-side effort is about a minute.
 1. Create a new Google Sheet.
 2. **Extensions → Apps Script**, delete the placeholder, paste [`backend/Code.gs`](backend/Code.gs), save.
 3. Run `setupSheet` once from the editor and approve the permission prompt. It creates the
-   `Items`, `Teams`, `Claims`, `Audit`, `Config`, and `Leaderboard` tabs and generates a
+   `Items`, `Teams`, `Claims`, `Attempts`, `Audit`, `Config`, and `Leaderboard` tabs and generates a
    `token` and `admin_token`.
 4. **`Items` tab** — one row per accepted item, with columns
    `tile_id`, `tile_name`, `item_id`, `item_name`, `points`, `required_count`, `notes`.
@@ -36,15 +36,29 @@ config. Total player-side effort is about a minute.
    distinct options. Quantities do not count: one drop of two blue dyes is still one distinct
    option.
 5. **`Teams` tab** — one row per player: `rsn`, `team`. This is the only place team membership
-   lives. RSNs are matched case-insensitively with `_` treated as a space, so `Zezima` and
-   `zez ima` behave as you'd expect. Use the exact same spelling and capitalization for every
-   member of a team; each distinct team name gets its own claim state for every logical tile.
+   lives. RSNs are matched case-insensitively with `_` treated as a space and runs of
+   separators collapsed, so `Zezima`, `zez ima`, and `Zez__Ima` are all the same player.
+
+   The tab is validated on every board and claim request, and ambiguous configuration fails
+   visibly instead of silently picking a row:
+
+   - Two rows for the same player — including spelling variants like `Jake_Steele` and
+     `jake steele` — are rejected, naming both row numbers. Previously the first row won.
+   - A row with an `rsn` but no `team`, or a `team` but no `rsn`, is rejected and names the
+     row. A half-filled row used to look exactly like a player who was never added.
+   - Fully blank rows are ignored, so trailing spreadsheet padding is fine.
+
+   Use the exact same spelling and capitalization for every member of a team; each distinct
+   team name gets its own claim state for every logical tile. Whatever spelling you use for a
+   player's `rsn` is the one shown in the sidebar and on the `Leaderboard` when they
+   contribute, so write it the way you want it to read.
 6. **Event time zone** — in **File → Settings**, set the spreadsheet **Time zone** to the
    organizer's intended event timezone. This single setting is authoritative for every player.
 7. **`Config` tab** — optionally set `event_start` / `event_end` as real Sheet date/time cells
    (recommended), or `yyyy-MM-dd HH:mm` text interpreted in the spreadsheet timezone. Start and
    end are inclusive; claims outside the window are rejected with `event_closed`. Invalid or
-   reversed boundaries fail closed. Leave `announce_from_backend` as `false` if players run Dink.
+   reversed boundaries fail closed. The backend never posts to Discord; every announcement
+   comes from a player's own Dink install, which is what attaches the screenshot.
 8. **`Leaderboard` tab** — read-only event view. It shows K-of-N progress, completed tiles,
    earned points, remaining tiles, and remaining points for every team. Points are awarded only
    when progress reaches `required_count`. Make corrections in `Items`, `Teams`, or `Claims`;
@@ -196,13 +210,22 @@ Grimy guam, say), kill something that drops it, and watch the tile close.
 | --- | --- |
 | Panel says "Not configured" | Backend URL is blank. No network calls are made until it's set. |
 | Panel says "Not on a team" | RSN missing from the `Teams` tab. |
+| Panel says "Backend error: Teams row N ..." | That `Teams` row has an `rsn` with no `team`, or a `team` with no `rsn`. Fill it in or clear it. |
+| Panel says "Backend error: Teams rows N and M ..." | Two rows are the same player once case and `_`/space are normalized. Delete one. |
 | Panel says "Event token rejected" | The plugin's **Event Token** does not match `token` on the `Config` tab. |
+| Status line shows "Last updated HH:mm — refresh failed" | The board on screen is the last one that loaded; a later refresh could not reach the backend. Drops are still being claimed. Press Refresh, or wait for the next automatic one. |
+| Header says "— not live", status says "Not claiming drops" | The backend answered and refused the last refresh, so the rows on screen are the last good board and no drops are being submitted. Fix the named reason and press Refresh; a successful refresh clears it and resumes claiming. |
 | Panel says "Backend error: ..." | The backend refused the fetch and named the reason: a missing sheet tab, an `Items` row it cannot read, or a bad `event_start`/`event_end`. The full reason is in the client log. |
 | Panel says "Check your connection" | The request never reached the backend. This one really is network or URL. |
-| Nothing happens on a drop, no chat line | Backend unreachable, or the item id on the board doesn't match the real drop. Check `Audit`. |
+| Nothing happens on a drop, no chat line | The item id on the board doesn't match the real drop, or **Chat message on claim** is off. Check `Audit`. A backend that cannot be reached now says so in chat. |
 | Chat says progress/claimed, nothing in Discord | Dink's *Enable External Plugin Notifications* is off, or no webhook is set. |
 | Every claim fails silently | Deployment is not *Who has access: Anyone*. The client log names this explicitly. |
 | Contribution credited to the wrong team | Use item-level or whole-tile admin unclaim above, then fix the `Teams` tab. |
+| Chat says "your event token was rejected" | The plugin's **Event Token** does not match `token` on the `Config` tab. The drop was not recorded; ask the organizer to reclaim it once the token is fixed. |
+| Chat says "the backend stayed busy" | Every retry hit the script lock. Rare outside a heavy drop burst; tell the organizer if it repeats. |
+| Chat says "that claim id was already used" | One claim id was reused for a different drop. The backend refuses to replay another player's outcome. Harmless once; report it if it repeats. |
+| Chat says "couldn't reach the backend" | No response arrived at all, so nothing was recorded. The same item is submitted again if you get another. |
+| Panel says "Backend error: Claims row N ..." | A `Claims` row credits a tile or item that `Items` no longer lists, usually a manual edit or a mid-event rename. The `Leaderboard` tab's **Claims integrity** cell shows the same thing. Restore the tile/option in `Items`, or remove the row with admin unclaim. Board loads and claims both fail until it is fixed. |
 
 ### Screenshot verification overlay
 
