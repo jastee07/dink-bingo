@@ -81,6 +81,29 @@ That's it — the player's RSN is matched against the `Teams` tab, so nobody has
 own team in config. The sidebar keeps the team summary and Refresh button visible while long
 tile lists scroll underneath them, with the **Test Dink** button below them.
 
+### Finding a tile on a long board
+
+Under the team summary is a **Filters** strip, folded away until you open it. It searches,
+filters, and sorts only the rows on screen; it never changes what a drop can claim, so a tile
+you have filtered out is still claimed normally when it drops.
+
+| Control | Default | What it does |
+| --- | --- | --- |
+| Search | *(blank)* | Case-insensitive match against tile names **and** item names, so a boss drop finds the tile it completes. Matching a tile name keeps all of its items |
+| Show | All | All, Open, In progress, or Completed tiles |
+| Sort | Board order | Board order, Name, Points (highest first), Progress (closest to done first), or Completion (unfinished work first) |
+| Only what can still be claimed | off | Hides completed tiles and items your team has already been credited for |
+| Clear filters | — | Puts all four back to their defaults |
+
+Board order is the default, and every other order is a stable sort over it, so tiles worth the
+same points stay in the order the organizer arranged them. The filters apply the same way in
+both board views, and they survive a refresh, so narrowing the list to one boss does not get
+thrown away every few minutes. Changing the **Backend URL** or **Event Token** is a different
+event, and clears them.
+
+When filters hide everything, the sidebar says so rather than showing an empty list, and the
+strip reads `Filters — on` even while it is folded away.
+
 ### Testing the Dink handoff
 
 The plugin can load the board and claim tiles perfectly while Dink delivery is still broken —

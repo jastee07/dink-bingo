@@ -144,6 +144,12 @@ Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
    to expand unfinished tiles into every item option your team can still contribute. Completed
    tiles, and items that already counted, stay visible struck through in both views until you
    enable **Hide Completed Tiles**.
+7. On a large board, open the **Filters** strip under the team summary to search by tile or
+   item name, show only open, in-progress, or completed tiles, sort by name, points, progress,
+   or completion, or leave only what can still be claimed. **Clear filters** puts it all back.
+   These controls change the rows on screen and nothing else: a tile filtered out of the list
+   is still claimed normally when it drops. They stay put across refreshes, and reset when the
+   organizer moves you to a different backend or token.
 
 Nothing else is needed. You don't pick your team, you don't enter item ids, and you don't have
 to remember to do anything when a drop lands.
