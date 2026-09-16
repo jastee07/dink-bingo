@@ -126,6 +126,9 @@ public class BingoPlugin extends Plugin {
 
         panel.setRefreshHandler(this::refreshBoard);
         panel.setTestHandler(this::sendDinkTest);
+        // The panel outlives a plugin restart, so filters from the previous run would
+        // silently narrow the first board of this one.
+        panel.clearFilters();
         if (bingoClient.isConfigured()) {
             panel.renderLoading();
         } else {
@@ -317,6 +320,9 @@ public class BingoPlugin extends Plugin {
             boardLoaded = false;
             detector.reset();
             panel.resetFreshness();
+            // A different backend or token is a different event. A search left over from the
+            // old board would present the new one as empty.
+            panel.clearFilters();
             if (bingoClient.isConfigured()) {
                 panel.renderLoading();
             }

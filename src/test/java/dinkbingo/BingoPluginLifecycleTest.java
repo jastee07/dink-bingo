@@ -7,6 +7,7 @@ import net.runelite.api.Player;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.chat.ChatMessageManager;
 import net.runelite.client.chat.QueuedMessage;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.overlay.OverlayManager;
 import org.junit.jupiter.api.BeforeEach;
@@ -96,6 +97,37 @@ class BingoPluginLifecycleTest {
             invocation.<Runnable>getArgument(0).run();
             return null;
         }).when(clientThread).invokeLater(any(Runnable.class));
+    }
+
+    /**
+     * A new backend or token is a different event with a different board. A search or filter
+     * left over from the old one would quietly present the new board as half empty.
+     */
+    @Test
+    void pointingAtANewEventClearsTheSidebarFilters() throws Exception {
+        when(bingoClient.fetchBoard("Jake"))
+            .thenReturn(CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+
+        plugin.startUp();
+        // The panel outlives a restart, so the run starts from an unfiltered board.
+        verify(panel).clearFilters();
+
+        plugin.onConfigChanged(configChanged("eventToken"));
+
+        verify(panel, times(2)).clearFilters();
+    }
+
+    /** Switching view or hiding completed tiles is not a new event, and keeps the filters. */
+    @Test
+    void aBoardPanelSettingChangeLeavesTheFiltersAlone() throws Exception {
+        when(bingoClient.fetchBoard("Jake"))
+            .thenReturn(CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+
+        plugin.startUp();
+
+        plugin.onConfigChanged(configChanged("boardView"));
+
+        verify(panel, times(1)).clearFilters();
     }
 
     @Test
@@ -455,6 +487,13 @@ class BingoPluginLifecycleTest {
         Field field = BingoPlugin.class.getDeclaredField(name);
         field.setAccessible(true);
         field.set(plugin, value);
+    }
+
+    private static ConfigChanged configChanged(String key) {
+        ConfigChanged event = new ConfigChanged();
+        event.setGroup(BingoConfig.GROUP);
+        event.setKey(key);
+        return event;
     }
 
     private static BingoBoard board(String team) {

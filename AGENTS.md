@@ -18,7 +18,10 @@ the normal Dink configuration and capture behavior.
 - `BingoDetector.java`: canonicalization, board matching, and in-flight/resolved dedupe.
 - `BingoClient.java`: Apps Script board/claim HTTP client and retry behavior.
 - `BingoAnnouncer.java`: Dink external-plugin payload; this is the screenshot/Discord boundary.
-- `BingoPanel.java`: sidebar board and refresh control.
+- `BingoPanel.java`: sidebar board, refresh control, and the local search/filter/sort strip.
+- `BoardFilter.java`, `BoardProgressFilter.java`, `BoardSort.java`: how the sidebar narrows and
+  orders the rows. A view over the immutable board only; nothing here may affect claim
+  eligibility or backend state.
 - `BingoConfig.java`: user-facing connection, detection, and announcement settings.
 - `BingoErrors.java`: the one mapping from a backend `error` value to player-facing wording,
   shared by the sidebar and the claim chat line so the two cannot drift.
