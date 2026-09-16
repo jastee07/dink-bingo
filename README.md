@@ -67,7 +67,11 @@ Existing sheets must follow the
    and a Discord webhook must be set (either Dink's *Primary Webhook URLs*, its *External
    Webhook Override*, or this plugin's own *Bingo Webhook Override*).
 3. In Bingo with Dink Notifications: paste the **Backend URL** and **Event Token**.
-4. Press **Test Dink** at the bottom of the sidebar and confirm the prompt. It posts a
+4. Press **System check** at the bottom of the sidebar. It reports every link in the chain —
+   backend, token, your name on the `Teams` tab, whether the event is open, and whether Dink
+   and Loot Tracker are running — and names a fix for anything that is wrong. It reads your
+   setup only: no tile is claimed and nothing is written to the sheet.
+5. Press **Test Dink** at the bottom of the sidebar and confirm the prompt. It posts a
    notification clearly marked as a test, claims nothing, and changes no tile. Nothing
    acknowledges a Dink message, so the plugin only reports that it handed the message over —
    **seeing it in Discord is the verification**. If it never appears, step 2 is wrong.
@@ -79,7 +83,40 @@ board. An explicit refusal from the backend also stops claim detection and says 
 
 That's it — the player's RSN is matched against the `Teams` tab, so nobody has to pick their
 own team in config. The sidebar keeps the team summary and Refresh button visible while long
-tile lists scroll underneath them, with the **Test Dink** button below them.
+tile lists scroll underneath them, with the **System check** and **Test Dink** buttons below
+them.
+
+### System check
+
+Most event-day failures are configuration spread across RuneLite, this plugin, Dink, the Apps
+Script deployment, and the organizer's sheet. Until a drop lands, the only thing the sidebar
+could prove was that a board loaded — one link in that chain.
+
+**System check** replaces the board with a readiness report covering all of it. Every row is
+derived from state the plugin already holds, and the only network call it makes is the ordinary
+board fetch, so running it cannot claim a tile, change the board, or write to the sheet.
+
+| Row | What it answers |
+| --- | --- |
+| Backend URL | Whether one is set, parses, and uses HTTPS. The URL itself is never shown |
+| Backend | Whether the round trip works at all — a refusal still counts as reachable |
+| Event token | Whether the backend accepted it |
+| Backend version | Whether the deployment understands this client's requests |
+| RuneScape name | The name the backend is asked about |
+| Team | The team the `Teams` tab resolved, or that your name is not on it |
+| Event | Open or closed |
+| Board | How much of it is left, and whether it is still live |
+| Claim detection | Whether drops are being submitted |
+| Dink | Installed and switched on, with a pointer to its *External Plugin Notifications* setting |
+| Loot Tracker | Installed and switched on — without it, chest and casket drops are not seen |
+
+Each row is `ready`, `warning`, `problem`, or not checked, and every warning and problem says
+what to do about it. A check that could not run reads as *not checked* and never as one that
+passed. Nothing in the report is proof that Discord received anything — only a message
+arriving in the channel is, which is what **Test Dink** below it is for.
+
+The headline rides on the button itself, so `System check — 1 problem` is visible from the
+board without opening anything.
 
 ### Finding a tile on a long board
 
@@ -137,7 +174,8 @@ drop. It is rate limited to one test every 30 seconds.
 | Message tokens | — | `%USERNAME%`, `%ITEM%`, `%TILE%`, `%TEAM%`, `%PROGRESS%`, `%REQUIRED%`, `%REMAINING%`, `%SOURCE%` |
 | Game Chat Confirmation | on | Prints the claim result in game so you know it registered |
 
-The sidebar's **Test Dink** button is not a setting: it posts a test notification on demand,
+The sidebar's **System check** and **Test Dink** buttons are not settings: they read the setup
+and post a test notification on demand,
 using **Send Screenshot** and **Bingo Webhook Override** exactly as a real claim would.
 
 ### Screenshot verification overlay

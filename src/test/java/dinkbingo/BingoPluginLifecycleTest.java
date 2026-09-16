@@ -8,6 +8,8 @@ import net.runelite.client.callback.ClientThread;
 import net.runelite.client.chat.ChatMessageManager;
 import net.runelite.client.chat.QueuedMessage;
 import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.plugins.Plugin;
+import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.overlay.OverlayManager;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,6 +24,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -29,6 +33,8 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -62,6 +68,8 @@ class BingoPluginLifecycleTest {
     @Mock
     private BingoPanel panel;
     @Mock
+    private PluginManager pluginManager;
+    @Mock
     private OverlayManager overlayManager;
     @Mock
     private BingoVerificationOverlay verificationOverlay;
@@ -82,9 +90,11 @@ class BingoPluginLifecycleTest {
         inject("detector", detector);
         inject("announcer", announcer);
         inject("panel", panel);
+        inject("pluginManager", pluginManager);
         inject("overlayManager", overlayManager);
         inject("verificationOverlay", verificationOverlay);
 
+        when(pluginManager.getPlugins()).thenReturn(Collections.emptyList());
         when(config.refreshMinutes()).thenReturn(5);
         when(config.boardView()).thenReturn(BoardView.NAMED_TILES);
         when(bingoClient.isConfigured()).thenReturn(true);
@@ -494,6 +504,141 @@ class BingoPluginLifecycleTest {
         event.setGroup(BingoConfig.GROUP);
         event.setKey(key);
         return event;
+    }
+
+    // ------------------------------------------------------------------
+    // readiness report
+    // ------------------------------------------------------------------
+
+    /**
+     * The report is a read. It reuses the ordinary board fetch and nothing else, so pressing
+     * it can no more change a tile than pressing Refresh can.
+     */
+    @Test
+    void runningTheChecksOnlyReadsTheBoard() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+        when(config.eventToken()).thenReturn("token");
+        when(bingoClient.backendUrlState()).thenReturn(BackendUrlState.OK);
+        when(detector.isDetectionEnabled()).thenReturn(true);
+
+        plugin.startUp();
+        ArgumentCaptor<Runnable> handler = ArgumentCaptor.forClass(Runnable.class);
+        verify(panel).setSystemCheckHandler(handler.capture());
+
+        handler.getValue().run();
+
+        verify(bingoClient, never()).submitClaim(any());
+        verify(panel, atLeastOnce()).renderSystemCheck(any(SystemStatus.class));
+    }
+
+    /**
+     * The whole point of the view: an organizer rotates the token mid-event, every drop stops
+     * counting, and the report has to name the token rather than leave the player guessing at
+     * their connection.
+     */
+    @Test
+    void aRejectedRefreshIsReportedAsTheTokenAndNotAsAConnectionProblem() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.rejected("bad_token")));
+        when(config.eventToken()).thenReturn("token");
+        when(bingoClient.backendUrlState()).thenReturn(BackendUrlState.OK);
+
+        plugin.startUp();
+
+        SystemStatus status = lastStatus();
+        assertEquals(SystemStatus.Fetch.REJECTED, status.getFetch());
+        assertEquals("bad_token", status.getBackendError());
+
+        SystemCheck check = SystemCheck.evaluate(status);
+        assertEquals(SystemCheck.State.FAILED, rowState(check, "Event token"));
+        // The round trip worked, so the connection is not what to go and look at.
+        assertEquals(SystemCheck.State.READY, rowState(check, "Backend"));
+    }
+
+    /**
+     * A new backend or token is a different event. Carrying the old verdict forward would
+     * report the previous event's setup as this one's, which is worse than saying nothing.
+     */
+    @Test
+    void pointingAtANewEventForgetsWhatTheOldOneProved() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.rejected("bad_token")),
+            CompletableFuture.completedFuture(BoardResult.unreachable()));
+        when(config.eventToken()).thenReturn("token");
+        when(bingoClient.backendUrlState()).thenReturn(BackendUrlState.OK);
+
+        plugin.startUp();
+        assertEquals("bad_token", lastStatus().getBackendError());
+
+        when(bingoClient.isConfigured()).thenReturn(false);
+        plugin.onConfigChanged(configChanged("backendUrl"));
+
+        SystemStatus status = lastStatus();
+        assertEquals(SystemStatus.Fetch.NOT_CHECKED, status.getFetch());
+        assertNull(status.getBackendError());
+        assertNull(status.getBoard());
+    }
+
+    /**
+     * The plugin is itself called "Bingo with Dink Notifications", so anything matching Dink
+     * by substring finds this plugin and reports a Dink that is not installed as running.
+     */
+    @Test
+    void theDinkCheckDoesNotMatchThisPluginsOwnName() throws Exception {
+        Plugin self = mock(Plugin.class);
+        when(self.getName()).thenReturn("Bingo with Dink Notifications");
+        doReturn(Collections.singletonList(self)).when(pluginManager).getPlugins();
+        when(pluginManager.isPluginEnabled(self)).thenReturn(true);
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+
+        plugin.startUp();
+
+        assertEquals(SystemStatus.Presence.MISSING, lastStatus().getDink());
+    }
+
+    /** A plugin list that cannot be read is admitted to rather than guessed at. */
+    @Test
+    void anUnreadablePluginListIsReportedAsUnknown() throws Exception {
+        doThrow(new IllegalStateException("not ready")).when(pluginManager).getPlugins();
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+
+        plugin.startUp();
+
+        assertEquals(SystemStatus.Presence.UNKNOWN, lastStatus().getDink());
+        assertEquals(SystemStatus.Presence.UNKNOWN, lastStatus().getLootTracker());
+    }
+
+    /** The panel outlives a restart, so the previous run's verdict must not survive it. */
+    @Test
+    void shuttingDownForgetsTheReport() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+
+        plugin.startUp();
+        plugin.shutDown();
+
+        verify(panel).resetSystemCheck();
+        // Wired on start-up and cleared on shutdown, so the button cannot reach a plugin that
+        // is no longer running.
+        verify(panel, times(2)).setSystemCheckHandler(any(Runnable.class));
+    }
+
+    private SystemStatus lastStatus() {
+        ArgumentCaptor<SystemStatus> captor = ArgumentCaptor.forClass(SystemStatus.class);
+        verify(panel, atLeastOnce()).renderSystemCheck(captor.capture());
+        return captor.getValue();
+    }
+
+    private static SystemCheck.State rowState(SystemCheck check, String name) {
+        for (SystemCheck.Row row : check.getRows()) {
+            if (row.getName().equals(name)) {
+                return row.getState();
+            }
+        }
+        throw new AssertionError("No row named " + name);
     }
 
     private static BingoBoard board(String team) {

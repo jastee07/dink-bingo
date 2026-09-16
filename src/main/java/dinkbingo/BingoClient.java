@@ -71,6 +71,17 @@ public class BingoClient {
         return parseUrl() != null;
     }
 
+    /**
+     * What the configured backend URL amounts to, for the readiness report.
+     * <p>
+     * Everything else here only needs to know whether a request can be made, but "unset",
+     * "not a URL", and "not HTTPS" are three different mistakes with three different fixes,
+     * and the parse is the only place that can tell them apart.
+     */
+    public BackendUrlState backendUrlState() {
+        return resolve().state;
+    }
+
     public CompletableFuture<BoardResult> fetchBoard(String rsn) {
         HttpUrl base = parseUrl();
         if (base == null || rsn == null) {
@@ -160,27 +171,34 @@ public class BingoClient {
      * chat line.
      */
     private HttpUrl parseUrl() {
+        return resolve().url;
+    }
+
+    private ParsedUrl resolve() {
         String raw = config.backendUrl();
         raw = raw == null ? "" : raw.trim();
         ParsedUrl cached = parsed;
         if (raw.equals(cached.raw)) {
-            return cached.url;
+            return cached;
         }
-        ParsedUrl fresh = new ParsedUrl(raw, validate(raw));
+        ParsedUrl fresh = validate(raw);
         parsed = fresh;
-        return fresh.url;
+        return fresh;
     }
 
-    private static HttpUrl validate(String raw) {
+    private static ParsedUrl validate(String raw) {
+        if (raw.isEmpty()) {
+            return new ParsedUrl(raw, null, BackendUrlState.UNSET);
+        }
         HttpUrl url = HttpUrl.parse(raw);
         if (url == null) {
-            return null;
+            return new ParsedUrl(raw, null, BackendUrlState.INVALID);
         }
         if (url.isHttps() || isLoopback(url.host())) {
-            return url;
+            return new ParsedUrl(raw, url, BackendUrlState.OK);
         }
         log.warn("Bingo backend URL must use HTTPS");
-        return null;
+        return new ParsedUrl(raw, null, BackendUrlState.INSECURE);
     }
 
     private static boolean isLoopback(String host) {
@@ -321,14 +339,16 @@ public class BingoClient {
     private static final class ParsedUrl {
 
         /** Matches no configured value, so the first lookup always parses. */
-        static final ParsedUrl UNPARSED = new ParsedUrl(null, null);
+        static final ParsedUrl UNPARSED = new ParsedUrl(null, null, BackendUrlState.UNSET);
 
         final String raw;
         final HttpUrl url;
+        final BackendUrlState state;
 
-        ParsedUrl(String raw, HttpUrl url) {
+        ParsedUrl(String raw, HttpUrl url, BackendUrlState state) {
             this.raw = raw;
             this.url = url;
+            this.state = state;
         }
     }
 }

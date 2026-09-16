@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
@@ -745,6 +746,224 @@ class BingoPanelTest {
         assertEquals("Twisted buckler", rowName(itemList.getComponent(2)));
         // The tile itself is unclaimed, so the name can only come from the contribution.
         assertEquals("Jake", rowEast(itemList.getComponent(1)));
+    }
+
+    // ------------------------------------------------------------------
+    // system check
+    // ------------------------------------------------------------------
+
+    /**
+     * The player who has not thought to open the report is exactly the one who needs to be
+     * told that nothing is being claimed, so the headline rides on the button itself.
+     */
+    @Test
+    void theSystemCheckButtonCarriesTheHeadlineWithoutBeingOpened() throws Exception {
+        BingoPanel panel = panel();
+        assertEquals("System check", panel.systemCheckButtonText());
+
+        renderCheck(panel, readyStatus().build());
+        assertEquals("System check \u2014 ready", panel.systemCheckButtonText());
+
+        renderCheck(panel, readyStatus().dink(SystemStatus.Presence.MISSING).build());
+        assertEquals("System check \u2014 1 warning", panel.systemCheckButtonText());
+
+        renderCheck(panel, readyStatus().detectionEnabled(false).build());
+        assertEquals("System check \u2014 1 problem", panel.systemCheckButtonText());
+    }
+
+    /**
+     * The report replaces the board rather than sitting above it: the filter strip has no rows
+     * to act on while it is up, and a sidebar this narrow cannot show both.
+     */
+    @Test
+    void openingTheReportReplacesTheBoardAndPutsItBack() throws Exception {
+        BingoPanel panel = panel();
+        render(panel, new BingoBoard("Team One", tiles(), true), BoardView.NAMED_TILES, false);
+        renderCheck(panel, readyStatus().build());
+
+        Component board = center(panel);
+        assertTrue(filterBarVisible(panel));
+
+        onEdt(() -> panel.setSystemCheckVisible(true));
+        assertTrue(panel.isShowingSystemCheck());
+        assertNotSame(board, center(panel));
+        assertEquals("Back to board", panel.systemCheckButtonText());
+        assertFalse(filterBarVisible(panel), "the strip filters tile rows, and there are none");
+
+        onEdt(() -> panel.setSystemCheckVisible(false));
+        assertFalse(panel.isShowingSystemCheck());
+        assertSame(board, center(panel), "the board comes back as it was");
+        assertTrue(filterBarVisible(panel));
+        assertEquals("System check \u2014 ready", panel.systemCheckButtonText());
+    }
+
+    /**
+     * Opening the report re-runs the checks, because a report showing what was true ten
+     * minutes ago is the problem it exists to solve. Going back to the board fetches nothing.
+     */
+    @Test
+    void openingTheReportAsksForFreshChecksAndGoingBackDoesNot() throws Exception {
+        BingoPanel panel = panel();
+        AtomicInteger runs = new AtomicInteger();
+        panel.setSystemCheckHandler(runs::incrementAndGet);
+
+        onEdt(() -> panel.setSystemCheckVisible(true));
+        assertEquals(1, runs.get());
+
+        // Already open: the button in the report itself asks again.
+        onEdt(() -> panel.setSystemCheckVisible(true));
+        assertEquals(2, runs.get());
+
+        onEdt(() -> panel.setSystemCheckVisible(false));
+        assertEquals(2, runs.get(), "going back to the board must not ask for anything");
+    }
+
+    /** A failing row is only useful if it says what to do, and the panel has to draw that. */
+    @Test
+    void aFailingRowIsDrawnWithItsRemedy() throws Exception {
+        BingoPanel panel = panel();
+        renderCheck(panel, readyStatus().backendUrl(BackendUrlState.UNSET).build());
+        onEdt(() -> panel.setSystemCheckVisible(true));
+
+        List<String> text = checkRowText(panel);
+        assertTrue(text.stream().anyMatch(line -> line.contains("Not set")), text.toString());
+        assertTrue(text.stream().anyMatch(line -> line.contains("/exec")), text.toString());
+    }
+
+    /**
+     * A team name comes from the organizer's sheet and a backend reason from a deployment the
+     * player does not control. Swing renders a label that starts with {@code <html>} as markup.
+     */
+    @Test
+    void reportRowsEscapeTextTheyDidNotWrite() throws Exception {
+        BingoPanel panel = panel();
+        renderCheck(panel, readyStatus()
+            .board(new BingoBoard("<html><b>Team</b>", tiles(), true))
+            .build());
+        onEdt(() -> panel.setSystemCheckVisible(true));
+
+        List<String> text = checkRowText(panel);
+        assertTrue(text.stream().anyMatch(line -> line.contains("&lt;html&gt;&lt;b&gt;Team")),
+            text.toString());
+        assertTrue(text.stream().noneMatch(line -> line.contains("<b>Team")), text.toString());
+    }
+
+    /**
+     * Opening the view before anything has been checked must not read as a report that found
+     * nothing wrong, and an empty panel reads exactly like one.
+     */
+    @Test
+    void theReportSaysSoBeforeAnythingHasBeenChecked() throws Exception {
+        BingoPanel panel = panel();
+        assertEquals("System check", panel.systemCheckButtonText());
+
+        onEdt(() -> panel.setSystemCheckVisible(true));
+        List<String> text = checkRowText(panel);
+        assertTrue(text.stream().anyMatch(line -> line.contains("Nothing has been checked yet")),
+            text.toString());
+    }
+
+    /**
+     * The panel outlives a plugin restart. A button still reading "ready" would be describing
+     * a run that has ended, which is the same lie the freshness line exists to prevent.
+     */
+    @Test
+    void shuttingDownForgetsTheLastReportAndGoesBackToTheBoard() throws Exception {
+        BingoPanel panel = panel();
+        renderCheck(panel, readyStatus().build());
+        onEdt(() -> panel.setSystemCheckVisible(true));
+        assertEquals("Back to board", panel.systemCheckButtonText());
+
+        resetCheck(panel);
+
+        assertFalse(panel.isShowingSystemCheck());
+        assertEquals("System check", panel.systemCheckButtonText());
+        onEdt(() -> panel.setSystemCheckVisible(true));
+        List<String> text = checkRowText(panel);
+        assertTrue(text.stream().anyMatch(line -> line.contains("Nothing has been checked yet")),
+            text.toString());
+    }
+
+    /** A status with everything working, for tests to break one thing at a time. */
+    private static SystemStatus.Builder readyStatus() {
+        return SystemStatus.builder()
+            .backendUrl(BackendUrlState.OK)
+            .tokenSet(true)
+            .loggedIn(true)
+            .rsn("Jake")
+            .fetch(SystemStatus.Fetch.LOADED)
+            .board(new BingoBoard("Team One", tiles(), true))
+            .detectionEnabled(true)
+            .dink(SystemStatus.Presence.RUNNING)
+            .lootTracker(SystemStatus.Presence.RUNNING);
+    }
+
+    /**
+     * Hand the panel a status and wait for the report to actually be on screen, for the same
+     * reason {@link #render} waits: {@code fastRemoveAll} pumps the queue as it works.
+     */
+    private static void renderCheck(BingoPanel panel, SystemStatus status) throws Exception {
+        int before = panel.checkRenderCount();
+        panel.renderSystemCheck(status);
+        awaitCheck(panel, before);
+    }
+
+    private static void resetCheck(BingoPanel panel) throws Exception {
+        int before = panel.checkRenderCount();
+        panel.resetSystemCheck();
+        awaitCheck(panel, before);
+    }
+
+    private static void awaitCheck(BingoPanel panel, int before) throws Exception {
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            flush();
+            if (panel.checkRenderCount() > before) {
+                return;
+            }
+            Thread.sleep(1);
+        }
+        throw new AssertionError("the report never rendered");
+    }
+
+    private static Component center(BingoPanel panel) throws Exception {
+        Component[] found = new Component[1];
+        onEdt(() -> found[0] = ((BorderLayout) panel.getLayout())
+            .getLayoutComponent(BorderLayout.CENTER));
+        return found[0];
+    }
+
+    private static boolean filterBarVisible(BingoPanel panel) throws Exception {
+        boolean[] visible = new boolean[1];
+        onEdt(() -> {
+            JPanel header = (JPanel) ((BorderLayout) panel.getLayout())
+                .getLayoutComponent(BorderLayout.NORTH);
+            visible[0] = ((BorderLayout) header.getLayout())
+                .getLayoutComponent(BorderLayout.SOUTH).isVisible();
+        });
+        return visible[0];
+    }
+
+    /** Every line of the report as a player reads it, remedies included. */
+    private static List<String> checkRowText(BingoPanel panel) throws Exception {
+        List<String> lines = new ArrayList<>();
+        onEdt(() -> {
+            JScrollPane pane = (JScrollPane) ((BorderLayout) panel.getLayout())
+                .getLayoutComponent(BorderLayout.CENTER);
+            JPanel list = (JPanel) pane.getViewport().getView();
+            for (Component component : list.getComponents()) {
+                if (!(component instanceof JPanel)) {
+                    continue;
+                }
+                JPanel row = (JPanel) component;
+                for (Component child : row.getComponents()) {
+                    if (child instanceof javax.swing.JLabel) {
+                        lines.add(((javax.swing.JLabel) child).getText());
+                    }
+                }
+            }
+        });
+        return lines;
     }
 
     private static String rowName(Component component) {

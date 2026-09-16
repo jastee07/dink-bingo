@@ -94,6 +94,31 @@ class BingoClientTest {
     }
 
     /**
+     * "Unset", "not a URL", and "not HTTPS" are three different mistakes with three different
+     * fixes, and the parse is the only place that can tell them apart. Everything else here
+     * only needs the boolean, so the distinction is easy to lose.
+     */
+    @Test
+    void reportsWhyAnUnusableBackendUrlIsUnusable() {
+        when(config.backendUrl()).thenReturn("  ");
+        assertEquals(BackendUrlState.UNSET, client.backendUrlState());
+
+        when(config.backendUrl()).thenReturn("not a url");
+        assertEquals(BackendUrlState.INVALID, client.backendUrlState());
+
+        when(config.backendUrl()).thenReturn("http://example.com/exec");
+        assertEquals(BackendUrlState.INSECURE, client.backendUrlState());
+
+        when(config.backendUrl()).thenReturn("https://example.com/exec");
+        assertEquals(BackendUrlState.OK, client.backendUrlState());
+        assertTrue(client.backendUrlState().isUsable());
+
+        // A loopback development server is usable, and must not be reported as insecure.
+        when(config.backendUrl()).thenReturn("http://localhost:8080/exec");
+        assertEquals(BackendUrlState.OK, client.backendUrlState());
+    }
+
+    /**
      * {@code BingoDetector} asks this for every game message, so a rejected URL must not warn
      * once per chat line: the flood buries the one message that would explain the problem.
      */

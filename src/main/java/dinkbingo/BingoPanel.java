@@ -109,6 +109,42 @@ public class BingoPanel extends PluginPanel {
     private final JLabel testStatusLabel = new JLabel();
 
     /**
+     * The readiness report, and the button that swaps it in for the board.
+     * <p>
+     * A second view rather than a section of the first one: it answers a different question
+     * ("is my setup going to work?" rather than "what is left to hunt?"), it is read once
+     * before an event rather than glanced at during one, and its rows are long enough that
+     * folding them into the board would push the tiles off a narrow sidebar.
+     */
+    private final JPanel checkPanel = new JPanel();
+    private final JScrollPane checkScrollPane = new JScrollPane(
+        checkPanel,
+        ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
+        ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
+    );
+    private final JButton systemCheckButton = new JButton();
+    private final JButton runChecksButton = new JButton("Run checks again");
+
+    /** Whether the report has replaced the board in the centre of the panel. EDT-owned. */
+    private boolean showingCheck;
+
+    /** The last report evaluated, so opening the view is instant. EDT-owned. */
+    @Nullable
+    private SystemCheck lastCheck;
+
+    private Runnable systemCheckHandler = () -> {
+    };
+
+    /** The button's untinted colour, captured before severity is allowed to change it. */
+    private Color defaultButtonColor;
+
+    /**
+     * Whether the board itself wants the filter strip. The report has no rows to filter, so
+     * the strip is hidden while it is up without forgetting what the board asked for.
+     */
+    private boolean filterBarWanted;
+
+    /**
      * Local view controls. They narrow and reorder what is on screen and nothing else: a tile
      * hidden here is still claimed normally when it drops, and no control reaches the backend.
      */
@@ -202,10 +238,39 @@ public class BingoPanel extends PluginPanel {
         header.add(refreshButton, BorderLayout.EAST);
         header.add(buildFilterBar(), BorderLayout.SOUTH);
 
+        systemCheckButton.setFocusPainted(false);
+        systemCheckButton.setFont(FontManager.getRunescapeSmallFont());
+        // Captured before anything tints it, so going back to ready restores the real default
+        // rather than a guess at what the look and feel uses.
+        defaultButtonColor = systemCheckButton.getForeground();
+        systemCheckButton.setToolTipText("Check the whole setup \u2014 backend, token, team, "
+            + "event, Dink \u2014 without claiming anything.");
+        systemCheckButton.addActionListener(e -> setSystemCheckVisible(!showingCheck));
+        updateSystemCheckButton();
+
+        runChecksButton.setFocusPainted(false);
+        runChecksButton.setFont(FontManager.getRunescapeSmallFont());
+        runChecksButton.addActionListener(e -> systemCheckHandler.run());
+
+        checkPanel.setLayout(new GridBagLayout());
+        checkPanel.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        checkScrollPane.setBorder(BorderFactory.createEmptyBorder());
+        checkScrollPane.getViewport().setBackground(ColorScheme.DARK_GRAY_COLOR);
+        checkScrollPane.getVerticalScrollBar().setUnitIncrement(16);
+        // The view can be opened before the plugin has published anything, and an empty panel
+        // is indistinguishable from a report that found nothing to say. Populated directly
+        // rather than through drawCheckRows: there is nothing to tear down yet, and the
+        // teardown is the part that belongs to the EDT.
+        populateCheckRows(null);
+
         JPanel footer = new JPanel(new BorderLayout(0, 4));
         footer.setBackground(ColorScheme.DARK_GRAY_COLOR);
         footer.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
-        footer.add(testButton, BorderLayout.NORTH);
+        JPanel buttons = new JPanel(new BorderLayout(0, 4));
+        buttons.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        buttons.add(systemCheckButton, BorderLayout.NORTH);
+        buttons.add(testButton, BorderLayout.CENTER);
+        footer.add(buttons, BorderLayout.NORTH);
         footer.add(testStatusLabel, BorderLayout.CENTER);
 
         itemsPanel.setLayout(new GridBagLayout());
@@ -226,6 +291,10 @@ public class BingoPanel extends PluginPanel {
 
     public void setTestHandler(Runnable handler) {
         this.testHandler = handler;
+    }
+
+    public void setSystemCheckHandler(Runnable handler) {
+        this.systemCheckHandler = handler;
     }
 
     /**
@@ -459,6 +528,223 @@ public class BingoPanel extends PluginPanel {
         return testStatusLabel.isVisible() ? testStatusLabel.getText() : "";
     }
 
+    // ------------------------------------------------------------------
+    // system check
+    // ------------------------------------------------------------------
+
+    /**
+     * A freshly evaluated readiness report. Safe to call from any thread.
+     * <p>
+     * Published whenever the plugin learns something new, not only while the report is on
+     * screen, so the button that opens it can carry the headline. A player who has not thought
+     * to look is exactly the one who needs to be told that nothing is being claimed.
+     */
+    public void renderSystemCheck(SystemStatus status) {
+        SystemCheck check = SystemCheck.evaluate(status);
+        SwingUtilities.invokeLater(() -> applySystemCheck(check));
+    }
+
+    private void applySystemCheck(SystemCheck check) {
+        lastCheck = check;
+        updateSystemCheckButton();
+        drawCheckRows(check);
+    }
+
+    /**
+     * Swap the report in for the board, or back.
+     * <p>
+     * Opening it asks for a fresh evaluation, which reuses the ordinary board refresh: it is
+     * coalesced with any fetch already in flight, and it is a read, so pressing this can never
+     * change a tile.
+     */
+    void setSystemCheckVisible(boolean visible) {
+        if (visible == showingCheck) {
+            if (visible) {
+                systemCheckHandler.run();
+            }
+            return;
+        }
+        showingCheck = visible;
+        remove(visible ? itemsScrollPane : checkScrollPane);
+        add(visible ? checkScrollPane : itemsScrollPane, BorderLayout.CENTER);
+        // The strip filters tile rows, and there are none on screen while the report is up.
+        filterBar.setVisible(filterBarWanted && !showingCheck);
+        updateSystemCheckButton();
+        if (visible) {
+            systemCheckHandler.run();
+        }
+        revalidate();
+        repaint();
+    }
+
+    private void setFilterBarWanted(boolean wanted) {
+        filterBarWanted = wanted;
+        filterBar.setVisible(wanted && !showingCheck);
+    }
+
+    /**
+     * Carries the headline on the button itself, so a broken setup is visible from the board
+     * without opening anything.
+     */
+    private void updateSystemCheckButton() {
+        if (showingCheck) {
+            systemCheckButton.setText("Back to board");
+            systemCheckButton.setForeground(defaultButtonColor);
+            return;
+        }
+        if (lastCheck == null) {
+            systemCheckButton.setText("System check");
+            systemCheckButton.setForeground(defaultButtonColor);
+            return;
+        }
+        systemCheckButton.setText("System check \u2014 " + lastCheck.summary());
+        // A problem has to be visible from the board, not only to whoever thought to look.
+        SystemCheck.State state = lastCheck.getState();
+        systemCheckButton.setForeground(state == SystemCheck.State.FAILED
+            || state == SystemCheck.State.WARNING
+            ? stateColor(state) : defaultButtonColor);
+    }
+
+    /** {@code null} before anything has been checked, which is not the same as nothing wrong. */
+    private void drawCheckRows(@Nullable SystemCheck check) {
+        SwingUtil.fastRemoveAll(checkPanel);
+        populateCheckRows(check);
+    }
+
+    private void populateCheckRows(@Nullable SystemCheck check) {
+        GridBagConstraints c = new GridBagConstraints();
+        c.fill = GridBagConstraints.HORIZONTAL;
+        c.gridx = 0;
+        c.gridy = 0;
+        c.weightx = 1;
+
+        checkPanel.add(runChecksButton, c);
+        c.gridy++;
+        checkPanel.add(buildCheckNote(), c);
+        c.gridy++;
+        if (check == null) {
+            checkPanel.add(buildEmptyRow("Nothing has been checked yet. Press Run checks "
+                + "again."), c);
+        } else {
+            for (SystemCheck.Row row : check.getRows()) {
+                checkPanel.add(buildCheckRow(row), c);
+                c.gridy++;
+            }
+        }
+
+        checkPanel.revalidate();
+        checkPanel.repaint();
+        checkRenderCount++;
+    }
+
+    /**
+     * Says up front that the report changes nothing, because the alternative way to find out
+     * whether a setup works is to claim a tile with a drop the team cannot get back.
+     */
+    private JPanel buildCheckNote() {
+        JPanel row = new JPanel(new BorderLayout());
+        row.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        row.setBorder(BorderFactory.createEmptyBorder(6, 0, 6, 0));
+        // The width hint is what makes a long HTML label wrap instead of clipping in the
+        // fixed-width sidebar.
+        JLabel label = new JLabel("<html><body style='width:100%'>Reads your setup only. "
+            + "Nothing here claims a tile, changes the board, or writes to the "
+            + "sheet.</body></html>");
+        label.setFont(FontManager.getRunescapeSmallFont());
+        label.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+        row.add(label, BorderLayout.CENTER);
+        return row;
+    }
+
+    private JPanel buildCheckRow(SystemCheck.Row check) {
+        JPanel row = new JPanel(new BorderLayout(0, 2));
+        row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+        row.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
+
+        JLabel name = new JLabel(glyph(check.getState()) + " " + check.getName());
+        name.setFont(FontManager.getRunescapeSmallFont());
+        name.setForeground(stateColor(check.getState()));
+        row.add(name, BorderLayout.NORTH);
+
+        // Every value below is escaped: a team name comes from the organizer's sheet and a
+        // backend reason from a deployment the player does not control, and Swing would
+        // otherwise render either as markup.
+        JLabel detail = new JLabel("<html><body style='width:100%'>"
+            + escape(check.getDetail()) + "</body></html>");
+        detail.setFont(FontManager.getRunescapeSmallFont());
+        detail.setForeground(OPEN_COLOR);
+        row.add(detail, BorderLayout.CENTER);
+
+        String action = check.getAction();
+        if (action != null) {
+            JLabel remedy = new JLabel("<html><body style='width:100%'>" + escape(action)
+                + "</body></html>");
+            remedy.setFont(FontManager.getRunescapeSmallFont());
+            remedy.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+            row.add(remedy, BorderLayout.SOUTH);
+        }
+
+        return row;
+    }
+
+    private static String glyph(SystemCheck.State state) {
+        switch (state) {
+            case READY:
+                return "\u2713";
+            case WARNING:
+                return "\u26A0";
+            case FAILED:
+                return "\u2717";
+            case CHECKING:
+                return "\u2026";
+            default:
+                return "\u2013";
+        }
+    }
+
+    private static Color stateColor(SystemCheck.State state) {
+        switch (state) {
+            case READY:
+                return ColorScheme.PROGRESS_COMPLETE_COLOR;
+            case WARNING:
+                return ColorScheme.PROGRESS_INPROGRESS_COLOR;
+            case FAILED:
+                return STALE_COLOR;
+            default:
+                return ColorScheme.LIGHT_GRAY_COLOR;
+        }
+    }
+
+    /**
+     * Forget the last report, for shutdown. The panel outlives a plugin restart, so a button
+     * still reading "System check -- ready" would be describing a run that has ended.
+     */
+    public void resetSystemCheck() {
+        SwingUtilities.invokeLater(() -> {
+            lastCheck = null;
+            setSystemCheckVisible(false);
+            updateSystemCheckButton();
+            drawCheckRows(null);
+        });
+    }
+
+    /** The button exactly as a player reads it. */
+    String systemCheckButtonText() {
+        return systemCheckButton.getText();
+    }
+
+    /** Whether the report has replaced the board. */
+    boolean isShowingSystemCheck() {
+        return showingCheck;
+    }
+
+    private volatile int checkRenderCount;
+
+    /** How many report renders have finished; the same test seam as {@link #renderCount()}. */
+    int checkRenderCount() {
+        return checkRenderCount;
+    }
+
     /** Safe to call from any thread. */
     public void render(
         BingoBoard board,
@@ -604,7 +890,7 @@ public class BingoPanel extends PluginPanel {
             statusLabel.setForeground(LIVE_STATUS_COLOR);
             statusLabel.setText("Set a Backend URL in the config");
             freshnessLabel.setVisible(false);
-            filterBar.setVisible(false);
+            setFilterBarWanted(false);
             refreshItemsPanel();
             renderCount++;
             return;
@@ -615,7 +901,7 @@ public class BingoPanel extends PluginPanel {
             statusLabel.setForeground(LIVE_STATUS_COLOR);
             statusLabel.setText("Your RSN is not on the Teams tab");
             freshnessLabel.setVisible(false);
-            filterBar.setVisible(false);
+            setFilterBarWanted(false);
             refreshItemsPanel();
             renderCount++;
             return;
@@ -635,7 +921,7 @@ public class BingoPanel extends PluginPanel {
         }
         updateFreshnessLabel();
 
-        filterBar.setVisible(true);
+        setFilterBarWanted(true);
         updateFiltersToggle();
         BoardFilter filter = currentFilter();
 
@@ -742,7 +1028,7 @@ public class BingoPanel extends PluginPanel {
         // There are no rows on screen, so there is nothing for a freshness line or a filter
         // control to act on.
         freshnessLabel.setVisible(false);
-        filterBar.setVisible(false);
+        setFilterBarWanted(false);
         refreshItemsPanel();
         renderCount++;
     }

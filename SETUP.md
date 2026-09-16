@@ -135,16 +135,20 @@ Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
 3. In **Bingo with Dink Notifications**, paste the **Backend URL** and **Event Token**.
 4. Confirm the **Loot Tracker** plugin is enabled (it is by default). See below — this matters
    more than it looks.
-5. Optionally press **Test Dink** at the bottom of the sidebar and confirm the prompt. This is
+5. Press **System check** at the bottom of the sidebar. It checks every link in the chain at
+   once — backend, token, your name on the `Teams` tab, whether the event is open, and whether
+   Dink and Loot Tracker are running — and names a fix for anything that is wrong. See
+   *Checking the whole setup* below.
+6. Optionally press **Test Dink** at the bottom of the sidebar and confirm the prompt. This is
    the only way to check Dink delivery before a real drop — see *Verifying Dink before the
    event* below.
-6. Open the bingo icon in the sidebar. If you see your team name and the tile list, you're done.
+7. Open the bingo icon in the sidebar. If you see your team name and the tile list, you're done.
    Long tile lists scroll below the fixed team summary and Refresh button. "Not on a team"
    means your RSN isn't on the organizer's `Teams` tab. Set **Board View** to **Possible Items**
    to expand unfinished tiles into every item option your team can still contribute. Completed
    tiles, and items that already counted, stay visible struck through in both views until you
    enable **Hide Completed Tiles**.
-7. On a large board, open the **Filters** strip under the team summary to search by tile or
+8. On a large board, open the **Filters** strip under the team summary to search by tile or
    item name, show only open, in-progress, or completed tiles, sort by name, points, progress,
    or completion, or leave only what can still be claimed. **Clear filters** puts it all back.
    These controls change the rows on screen and nothing else: a tile filtered out of the list
@@ -153,6 +157,39 @@ Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
 
 Nothing else is needed. You don't pick your team, you don't enter item ids, and you don't have
 to remember to do anything when a drop lands.
+
+### Checking the whole setup
+
+Start here when something is not working. A bingo setup is spread across RuneLite, this plugin,
+Dink, the Apps Script deployment, and the organizer's sheet, and a board that loads only proves
+one link in that chain.
+
+**System check** at the bottom of the sidebar replaces the board with a readiness report:
+
+| Row | Ready means | Common failure |
+| --- | --- | --- |
+| Backend URL | Set, parses, and uses HTTPS | Blank, mistyped, or an `http://` link |
+| Backend | The round trip works | No response at all — this one really is network or URL |
+| Event token | The backend accepted it | The organizer rotated `token` on the `Config` tab |
+| Backend version | The deployment understands this client | The Apps Script is on an old copy of `Code.gs` and needs re-deploying |
+| RuneScape name | The name the backend is asked about | Not logged in yet |
+| Team | Resolved from the `Teams` tab | Your name is missing from it, or spelled differently |
+| Event | Open | Closed, so no drop will be claimed |
+| Board | Loaded and live | On screen but no longer refreshing |
+| Claim detection | Drops are being submitted | Suspended after the backend refused a refresh |
+| Dink | Installed and switched on | Missing or off — tiles still count, but nothing is announced |
+| Loot Tracker | Installed and switched on | Off, so chest and casket drops are not seen at all |
+
+Every warning and problem carries a one-line fix, and the headline sits on the button itself, so
+`System check — 1 problem` is visible without opening it. A check that could not run reads as
+*not checked*, never as one that passed.
+
+It reads your setup and nothing else: no tile is claimed, no `Claims` or `Audit` row is written,
+and the only request it makes is the same board fetch **Refresh** makes. The configured Backend
+URL and Event Token are never shown, so the report is safe to screenshot into a clan chat.
+
+A ready Dink row is still not proof of Discord delivery — nothing acknowledges a Dink message.
+That is what **Test Dink** is for.
 
 ### Verifying Dink before the event
 
@@ -240,8 +277,12 @@ Grimy guam, say), kill something that drops it, and watch the tile close.
 
 ## Troubleshooting
 
+Press **System check** at the bottom of the sidebar first: it names the failing link and the fix
+for it, which is faster than matching a symptom below. The table stays as the reference.
+
 | Symptom | Cause |
 | --- | --- |
+| **System check** shows a problem | Each row carries its own fix. Work down from the top — the first failing row is the one to fix, since the rows below it are checking things that depend on it. |
 | Panel says "Not configured" | Backend URL is blank. No network calls are made until it's set. |
 | Panel says "Not on a team" | RSN missing from the `Teams` tab. |
 | Panel says "Backend error: Teams row N ..." | That `Teams` row has an `rsn` with no `team`, or a `team` with no `rsn`. Fill it in or clear it. |

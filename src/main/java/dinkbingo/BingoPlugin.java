@@ -7,6 +7,7 @@ import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.NPC;
+import net.runelite.api.Player;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.client.callback.ClientThread;
@@ -20,6 +21,7 @@ import net.runelite.client.events.PlayerLootReceived;
 import net.runelite.client.events.ServerNpcLoot;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.plugins.loottracker.LootReceived;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
@@ -27,6 +29,7 @@ import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ColorUtil;
 import net.runelite.client.util.ImageUtil;
 import net.runelite.http.api.loottracker.LootRecordType;
+import org.jetbrains.annotations.Nullable;
 
 import javax.inject.Inject;
 import java.awt.Color;
@@ -75,6 +78,9 @@ public class BingoPlugin extends Plugin {
     private BingoPanel panel;
 
     @Inject
+    private PluginManager pluginManager;
+
+    @Inject
     private OverlayManager overlayManager;
 
     @Inject
@@ -92,6 +98,19 @@ public class BingoPlugin extends Plugin {
     private long inFlightRefresh;
     private volatile BingoBoard currentBoard = BingoBoard.EMPTY;
     private volatile boolean boardLoaded;
+
+    /**
+     * What the last board fetch did, for the readiness report.
+     * <p>
+     * Distinct from {@link #boardLoaded}, which only says whether rows exist: a board that
+     * loaded an hour ago and has been refused ever since is loaded and not current, and the
+     * report has to be able to say which.
+     */
+    private volatile SystemStatus.Fetch fetchState = SystemStatus.Fetch.NOT_CHECKED;
+
+    /** The backend's raw reason for the last refusal, or null. */
+    @Nullable
+    private volatile String lastBackendError;
 
     @Provides
     BingoConfig provideConfig(ConfigManager configManager) {
@@ -111,6 +130,8 @@ public class BingoPlugin extends Plugin {
         }
         currentBoard = BingoBoard.EMPTY;
         boardLoaded = false;
+        fetchState = SystemStatus.Fetch.NOT_CHECKED;
+        lastBackendError = null;
         detector.setClaimListener(this::onClaimResolved);
         detector.setClaimUnresolvedListener(this::onClaimUnresolved);
         overlayManager.add(verificationOverlay);
@@ -126,6 +147,7 @@ public class BingoPlugin extends Plugin {
 
         panel.setRefreshHandler(this::refreshBoard);
         panel.setTestHandler(this::sendDinkTest);
+        panel.setSystemCheckHandler(this::runSystemCheck);
         // The panel outlives a plugin restart, so filters from the previous run would
         // silently narrow the first board of this one.
         panel.clearFilters();
@@ -160,14 +182,18 @@ public class BingoPlugin extends Plugin {
         });
         panel.setTestHandler(() -> {
         });
+        panel.setSystemCheckHandler(() -> {
+        });
         detector.setClaimListener((response, source) -> {
         });
         detector.setClaimUnresolvedListener(itemName -> {
         });
         detector.reset();
         // The panel outlives a plugin restart, so a timestamp left behind would describe a
-        // board from the previous run.
+        // board from the previous run, and a readiness summary left behind would describe a
+        // run that has ended.
         panel.resetFreshness();
+        panel.resetSystemCheck();
     }
 
     // ------------------------------------------------------------------
@@ -202,9 +228,12 @@ public class BingoPlugin extends Plugin {
         if (!bingoClient.isConfigured()) {
             currentBoard = BingoBoard.EMPTY;
             boardLoaded = false;
+            fetchState = SystemStatus.Fetch.NOT_CHECKED;
+            lastBackendError = null;
             detector.reset();
             panel.resetFreshness();
             renderBoard(BingoBoard.EMPTY, false);
+            publishSystemStatus();
             return;
         }
         if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null) {
@@ -224,7 +253,9 @@ public class BingoPlugin extends Plugin {
             inFlightRefresh = fetchRefresh;
         }
 
+        fetchState = SystemStatus.Fetch.CHECKING;
         panel.markRefreshing();
+        publishSystemStatus();
         bingoClient.fetchBoard(rsn).whenComplete((result, error) ->
             finishRefresh(lifecycle, fetchRefresh, result, error));
     }
@@ -247,6 +278,8 @@ public class BingoPlugin extends Plugin {
                 BingoBoard board = result.getBoard();
                 currentBoard = board;
                 boardLoaded = true;
+                fetchState = SystemStatus.Fetch.LOADED;
+                lastBackendError = null;
                 // Re-enables detection if an earlier refusal suspended it.
                 detector.setBoard(board);
                 // Only reached for a lifecycle-current refresh, so a stale completion from an
@@ -257,6 +290,9 @@ public class BingoPlugin extends Plugin {
                 // A reason only exists when the backend answered and refused. Everything
                 // else really is a failed round trip, which is what the generic message says.
                 String backendError = result == null ? null : result.getBackendError();
+                fetchState = backendError != null
+                    ? SystemStatus.Fetch.REJECTED : SystemStatus.Fetch.UNREACHABLE;
+                lastBackendError = backendError;
                 if (backendError != null) {
                     // An explicit refusal -- a rotated token, a redeployed script, a broken
                     // sheet -- means the backend will not honour this client as it stands.
@@ -280,6 +316,9 @@ public class BingoPlugin extends Plugin {
                     panel.renderLoadError();
                 }
             }
+            // After the outcome has been applied, so the report and the board can never
+            // disagree about what the last fetch did.
+            publishSystemStatus();
         }
         if (rerun && active) {
             refreshBoard();
@@ -299,11 +338,14 @@ public class BingoPlugin extends Plugin {
             refreshGeneration.incrementAndGet();
             currentBoard = BingoBoard.EMPTY;
             boardLoaded = false;
+            fetchState = SystemStatus.Fetch.NOT_CHECKED;
+            lastBackendError = null;
             detector.reset();
             panel.resetFreshness();
             if (bingoClient.isConfigured()) {
                 panel.renderLoading();
             }
+            publishSystemStatus();
         }
     }
 
@@ -318,6 +360,10 @@ public class BingoPlugin extends Plugin {
         if ("backendUrl".equals(event.getKey()) || "eventToken".equals(event.getKey())) {
             currentBoard = BingoBoard.EMPTY;
             boardLoaded = false;
+            // Nothing has been proved about the new backend or token yet, and carrying the
+            // old verdict forward would report the previous event's setup as this one's.
+            fetchState = SystemStatus.Fetch.NOT_CHECKED;
+            lastBackendError = null;
             detector.reset();
             panel.resetFreshness();
             // A different backend or token is a different event. A search left over from the
@@ -335,6 +381,105 @@ public class BingoPlugin extends Plugin {
 
     private void renderBoard(BingoBoard board, boolean configured) {
         panel.render(board, configured, config.boardView(), config.hideCompletedTiles());
+    }
+
+    // ------------------------------------------------------------------
+    // readiness report
+    // ------------------------------------------------------------------
+
+    /**
+     * Dink's plugin name and package. Matched exactly rather than by substring, because this
+     * plugin is itself called "Bingo with Dink Notifications" and would otherwise find itself.
+     */
+    private static final String DINK_NAME = "Dink";
+    private static final String DINK_PACKAGE = "dinkplugin.";
+    private static final String LOOT_TRACKER_NAME = "Loot Tracker";
+
+    /**
+     * Re-check everything and show the result.
+     * <p>
+     * The only network call this makes is the ordinary board fetch, which is a read, is
+     * coalesced with any refresh already in flight, and runs off the client thread. Pressing
+     * this can no more change a tile than pressing Refresh can.
+     */
+    private void runSystemCheck() {
+        if (!active) {
+            return;
+        }
+        refreshBoard();
+        publishSystemStatus();
+    }
+
+    /**
+     * Gather the current state and hand it to the panel.
+     * <p>
+     * On the client thread because the game state and the local player can only be read there.
+     * Everything gathered is an in-memory field read, so the hop is cheap; the one genuinely
+     * slow part of a check is the board fetch, which is somebody else's thread entirely.
+     */
+    private void publishSystemStatus() {
+        long lifecycle = lifecycleGeneration.get();
+        clientThread.invokeLater(() -> {
+            if (!isCurrent(lifecycle)) {
+                return;
+            }
+            panel.renderSystemCheck(buildSystemStatus());
+        });
+    }
+
+    private SystemStatus buildSystemStatus() {
+        Player local = client.getLocalPlayer();
+        boolean loggedIn = client.getGameState() == GameState.LOGGED_IN && local != null;
+        String token = config.eventToken();
+        return SystemStatus.builder()
+            .backendUrl(bingoClient.backendUrlState())
+            .tokenSet(token != null && !token.trim().isEmpty())
+            .loggedIn(loggedIn)
+            .rsn(loggedIn ? local.getName() : null)
+            .fetch(fetchState)
+            .backendError(lastBackendError)
+            .board(boardLoaded ? currentBoard : null)
+            .detectionEnabled(detector.isDetectionEnabled())
+            .dink(presenceOf(DINK_NAME, DINK_PACKAGE))
+            .lootTracker(presenceOf(LOOT_TRACKER_NAME, null))
+            .build();
+    }
+
+    /**
+     * Whether a RuneLite plugin this one depends on is installed and switched on.
+     * <p>
+     * Reports {@code UNKNOWN} rather than guessing if the plugin list cannot be read. A report
+     * that invented "not installed" for a plugin that is in fact running would send a player
+     * off to fix something that was never broken, which is worse than admitting it does not
+     * know.
+     */
+    private SystemStatus.Presence presenceOf(String name, @Nullable String packagePrefix) {
+        try {
+            Plugin found = null;
+            for (Plugin plugin : pluginManager.getPlugins()) {
+                if (matches(plugin, name, packagePrefix)) {
+                    found = plugin;
+                    break;
+                }
+            }
+            if (found == null) {
+                return SystemStatus.Presence.MISSING;
+            }
+            return pluginManager.isPluginEnabled(found)
+                ? SystemStatus.Presence.RUNNING : SystemStatus.Presence.DISABLED;
+        } catch (RuntimeException e) {
+            log.debug("Could not read the RuneLite plugin list", e);
+            return SystemStatus.Presence.UNKNOWN;
+        }
+    }
+
+    private static boolean matches(Plugin plugin, String name, @Nullable String packagePrefix) {
+        if (name.equalsIgnoreCase(plugin.getName())) {
+            return true;
+        }
+        // A plugin's display name is its author's to change; the package it ships in is not.
+        return packagePrefix != null
+            && plugin.getClass().getName().startsWith(packagePrefix);
     }
 
     // ------------------------------------------------------------------

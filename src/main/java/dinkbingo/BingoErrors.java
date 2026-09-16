@@ -107,6 +107,24 @@ final class BingoErrors {
             + " was not claimed. It will be tried again if you get it again.";
     }
 
+    /**
+     * Whether a backend reason means the deployment did not understand the request at all,
+     * which is what an Apps Script left on an old copy of {@code Code.gs} looks like from
+     * here. Kept beside the wording so a new reason cannot be added to one and not the other.
+     */
+    static boolean isUnsupportedRequest(@Nullable String backendError) {
+        Reason reason = lookup(normalize(backendError));
+        return reason == Reason.BAD_JSON
+            || reason == Reason.BAD_REQUEST
+            || reason == Reason.POST_REQUIRED
+            || reason == Reason.UNKNOWN_ACTION;
+    }
+
+    /** Whether a backend reason means the event token itself was refused. */
+    static boolean isBadToken(@Nullable String backendError) {
+        return lookup(normalize(backendError)) == Reason.BAD_TOKEN;
+    }
+
     @Nullable
     private static Reason lookup(String error) {
         for (Reason reason : Reason.values()) {

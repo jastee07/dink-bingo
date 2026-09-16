@@ -18,7 +18,12 @@ the normal Dink configuration and capture behavior.
 - `BingoDetector.java`: canonicalization, board matching, and in-flight/resolved dedupe.
 - `BingoClient.java`: Apps Script board/claim HTTP client and retry behavior.
 - `BingoAnnouncer.java`: Dink external-plugin payload; this is the screenshot/Discord boundary.
-- `BingoPanel.java`: sidebar board, refresh control, and the local search/filter/sort strip.
+- `BingoPanel.java`: sidebar board, refresh control, the local search/filter/sort strip, and
+  the readiness report view.
+- `SystemCheck.java`, `SystemStatus.java`, `BackendUrlState.java`: the pre-event readiness
+  report. `SystemStatus` is an immutable snapshot of what the plugin already knows and
+  `SystemCheck` turns it into rows; both are pure and free of Swing. Read-only by
+  construction: `SystemStatus` carries no URL or token, so no row can put either on screen.
 - `BoardFilter.java`, `BoardProgressFilter.java`, `BoardSort.java`: how the sidebar narrows and
   orders the rows. A view over the immutable board only; nothing here may affect claim
   eligibility or backend state.
@@ -89,6 +94,12 @@ The sidebar's **Test Dink** button posts a non-claiming `PluginMessage("dink", "
 over the same url selection and screenshot flag as a real announcement. It is the
 non-destructive way to verify the Dink handoff: it must never call the backend, never carry an
 item, tile or team, and never report delivery, because Dink acknowledges nothing.
+
+The sidebar's **System check** button reports the setup and changes nothing. It must stay a
+read: the only request it may make is the ordinary board fetch, it must never claim a tile or
+write a `Claims` or `Audit` row, and it must never display the backend URL or the event token.
+A check that could not run reports `NOT_CHECKED`; reporting it as `READY` recreates the false
+confidence the view exists to remove.
 
 Use a reversible test tile and team when manually verifying screenshot/webhook integration.
 Before making the test claim:
