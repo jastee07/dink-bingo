@@ -32,6 +32,16 @@ the normal Dink configuration and capture behavior.
 message contract, but it is a separate project. Do not edit it unless the task explicitly
 requires a Dink change.
 
+## Branches
+
+`develop` is the integration branch. Open pull requests against it, not against `main`.
+
+`main` is reserved as the release branch and takes merges from `develop`, never directly from a
+feature branch. Do not retarget a pull request at `main` without being asked to.
+
+CI runs on every pull request whatever its base, and on pushes to both `main` and `develop`, so
+work that lands on the integration branch is still covered.
+
 ## Safe workflow
 
 Run from the repository root:
