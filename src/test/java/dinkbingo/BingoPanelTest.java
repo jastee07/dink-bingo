@@ -10,9 +10,15 @@ import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingUtilities;
 import java.awt.BorderLayout;
 import java.awt.Component;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -23,6 +29,226 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class BingoPanelTest {
+
+    /**
+     * During an event a board that stopped refreshing looks exactly like one that is current,
+     * which is the difference between trusting the tile list and reloading the client.
+     */
+    @Test
+    void freshnessLineReportsEachRefreshOutcome() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        panel.setClock(Clock.fixed(Instant.parse("2026-09-15T14:32:00Z"), ZoneOffset.UTC));
+
+        BingoBoard board = new BingoBoard("Team One", tiles(), true);
+
+        // Nothing has loaded yet, so there is nothing to describe.
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        assertEquals("", panel.freshnessText());
+
+        panel.markRefreshing();
+        assertEquals("Refreshing\u2026", panel.freshnessText());
+
+        panel.markRefreshSucceeded();
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        String updated = panel.freshnessText();
+        assertTrue(updated.startsWith("Updated "), updated);
+
+        // A failed round trip keeps the rows and the time they were last confirmed.
+        panel.markRefreshFailed();
+        String failed = panel.freshnessText();
+        assertTrue(failed.startsWith("Last updated "), failed);
+        assertTrue(failed.endsWith("refresh failed"), failed);
+        assertEquals(updated.substring("Updated ".length()),
+            failed.substring("Last updated ".length(), failed.indexOf(" \u2014")),
+            "a failed refresh must not move the last-success time");
+
+        // Recovery clears the warning.
+        panel.markRefreshSucceeded();
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        assertEquals(updated, panel.freshnessText());
+    }
+
+    /**
+     * The board is also re-rendered when the player switches view or hides completed tiles.
+     * Those are not refreshes, and stamping them as one would report a board as current when
+     * nothing was fetched.
+     */
+    @Test
+    void reRenderingForAViewChangeDoesNotLookLikeARefresh() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        panel.setClock(Clock.fixed(Instant.parse("2026-09-15T14:32:00Z"), ZoneOffset.UTC));
+        BingoBoard board = new BingoBoard("Team One", tiles(), true);
+
+        panel.markRefreshSucceeded();
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        String afterRefresh = panel.freshnessText();
+
+        panel.setClock(Clock.fixed(Instant.parse("2026-09-15T18:00:00Z"), ZoneOffset.UTC));
+        panel.render(board, true, BoardView.POSSIBLE_ITEMS, true);
+        flush();
+
+        assertEquals(afterRefresh, panel.freshnessText(),
+            "switching view must not restamp the board as freshly fetched");
+    }
+
+    /** A rejection keeps the rows but must not let them read as current. */
+    @Test
+    void aRejectedRefreshLabelsTheBoardAndKeepsItsAge() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        panel.setClock(Clock.fixed(Instant.parse("2026-09-15T14:32:00Z"), ZoneOffset.UTC));
+        BingoBoard board = new BingoBoard("Team One", tiles(), true);
+
+        panel.markRefreshSucceeded();
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        flush();
+
+        panel.renderStale(board, true, BoardView.NAMED_TILES, false, "bad_token");
+        assertTrue(panel.freshnessText().startsWith("Last updated "), panel.freshnessText());
+
+        // Re-rendering while rejected keeps the warning rather than quietly going live again.
+        panel.render(board, true, BoardView.POSSIBLE_ITEMS, false);
+        assertTrue(panel.freshnessText().startsWith("Last updated "), panel.freshnessText());
+    }
+
+    /** Logout, a token change, or a plugin restart makes the previous board's age meaningless. */
+    @Test
+    void resetClearsTheFreshnessLine() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        BingoBoard board = new BingoBoard("Team One", tiles(), true);
+
+        panel.markRefreshSucceeded();
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        assertFalse(panel.freshnessText().isEmpty());
+
+        panel.resetFreshness();
+        assertEquals("", panel.freshnessText());
+    }
+
+    /** A message screen has no rows, so there is nothing for a freshness line to describe. */
+    @Test
+    void messageScreensHideTheFreshnessLine() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        BingoBoard board = new BingoBoard("Team One", tiles(), true);
+
+        panel.markRefreshSucceeded();
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        assertFalse(panel.freshnessText().isEmpty());
+
+        panel.renderLoading();
+        assertEquals("", panel.freshnessText());
+    }
+
+    // ------------------------------------------------------------------
+    // Dink test action
+    // ------------------------------------------------------------------
+
+    /**
+     * A misconfigured Dink is invisible until the first real drop, so the test has to work
+     * with no eligible item and no live event -- it only hands a message to the plugin.
+     */
+    @Test
+    void theDinkTestIsAvailableWithoutABoardAndReportsWhatItActuallyDid() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        panel.setClock(Clock.fixed(Instant.parse("2026-09-15T14:32:00Z"), ZoneOffset.UTC));
+        AtomicInteger sent = new AtomicInteger();
+        panel.setTestHandler(sent::incrementAndGet);
+
+        // No board has ever loaded.
+        panel.renderLoading();
+        flush();
+
+        assertEquals("", panel.testStatusText());
+        assertTrue(invokeSendTest(panel));
+        assertEquals(1, sent.get());
+
+        String status = panel.testStatusText();
+        assertTrue(status.contains("Sent to Dink"), status);
+        // Dink acknowledges nothing, so the panel must not imply it arrived anywhere.
+        assertTrue(status.contains("does not confirm delivery"), status);
+        assertTrue(status.contains("check Discord"), status);
+        assertFalse(status.toLowerCase().contains("delivered"), status);
+    }
+
+    /** One stray double-click should not put two tests in an organizer's channel. */
+    @Test
+    void repeatedDinkTestsAreRateLimitedUntilTheCooldownElapses() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        MutableClock clock = new MutableClock(Instant.parse("2026-09-15T14:32:00Z"));
+        panel.setClock(clock);
+        AtomicInteger sent = new AtomicInteger();
+        panel.setTestHandler(sent::incrementAndGet);
+
+        assertTrue(invokeSendTest(panel));
+        assertFalse(invokeSendTest(panel), "a second press inside the cooldown must not post");
+        clock.advanceSeconds(29);
+        assertFalse(invokeSendTest(panel));
+        assertEquals(1, sent.get());
+
+        clock.advanceSeconds(1);
+        assertTrue(invokeSendTest(panel), "the cooldown must expire rather than lock the button");
+        assertEquals(2, sent.get());
+    }
+
+    private static boolean invokeSendTest(BingoPanel panel) throws Exception {
+        AtomicBoolean sent = new AtomicBoolean();
+        SwingUtilities.invokeAndWait(() -> sent.set(panel.sendTest()));
+        return sent.get();
+    }
+
+    /** Lets a test step over the cooldown without sleeping through it. */
+    private static final class MutableClock extends Clock {
+
+        private Instant now;
+
+        MutableClock(Instant now) {
+            this.now = now;
+        }
+
+        void advanceSeconds(long seconds) {
+            now = now.plusSeconds(seconds);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
+    }
+
+    private static List<BingoTile> tiles() {
+        return Collections.singletonList(new BingoTile("4151", "Abyssal whip", 1, 1, 0,
+            Collections.singletonList(new BingoItem(4151, "Abyssal whip")),
+            Collections.emptyList(), false, null, null, null));
+    }
+
+    private static void flush() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+        });
+    }
+
 
     @Test
     void longTileListScrollsWhileHeaderRemainsFixed() throws Exception {

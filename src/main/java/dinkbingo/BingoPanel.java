@@ -14,18 +14,27 @@ import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JLabel;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.FormatStyle;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.StringJoiner;
 
@@ -37,14 +46,52 @@ public class BingoPanel extends PluginPanel {
 
     private static final Color CLAIMED_COLOR = new Color(0x7A, 0x7A, 0x7A);
     private static final Color OPEN_COLOR = Color.WHITE;
+    private static final Color STALE_COLOR = new Color(0xDB, 0x6E, 0x6E);
+    private static final Color LIVE_STATUS_COLOR = ColorScheme.LIGHT_GRAY_COLOR;
 
-    /** Keeps an unrecognized backend reason from pushing the sidebar out of shape. */
-    private static final int MAX_REASON_LENGTH = 80;
 
     private final ItemManager itemManager;
 
     private final JLabel headerLabel = new JLabel();
     private final JLabel statusLabel = new JLabel();
+    private final JLabel freshnessLabel = new JLabel();
+
+    /**
+     * How current the rows on screen are.
+     * <p>
+     * Owned by the panel rather than recomputed per render, so re-drawing for an unrelated
+     * reason -- switching board view, toggling hidden tiles -- cannot make a board look
+     * freshly fetched when nothing was fetched.
+     */
+    private volatile Freshness freshness = Freshness.UNKNOWN;
+
+    /** When the last lifecycle-current board actually arrived; null until one has. */
+    @Nullable
+    private volatile Instant lastSuccess;
+
+    /** Non-null only while the backend has explicitly refused a refresh. */
+    @Nullable
+    private volatile String staleReason;
+
+    /**
+     * Whether the tile rows are on screen at all. A loading or error screen has no rows, so
+     * there is nothing for a freshness line to describe.
+     */
+    private volatile boolean showingBoard;
+
+    /** Overridden in tests so the rendered time does not depend on the wall clock. */
+    private Clock clock = Clock.systemDefaultZone();
+
+    /**
+     * Built once. The label is re-rendered on every refresh, so formatting must not allocate a
+     * formatter each time, and the player's own locale and zone decide how the time reads.
+     */
+    private final DateTimeFormatter timeFormat = DateTimeFormatter
+        .ofLocalizedTime(FormatStyle.SHORT)
+        .withLocale(Locale.getDefault())
+        .withZone(ZoneId.systemDefault());
+
+    private enum Freshness { UNKNOWN, REFRESHING, UPDATED, FAILED, REJECTED }
     private final JPanel itemsPanel = new JPanel();
     private final JScrollPane itemsScrollPane = new JScrollPane(
         itemsPanel,
@@ -52,9 +99,24 @@ public class BingoPanel extends PluginPanel {
         ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
     );
     private final JButton refreshButton = new JButton("Refresh");
+    private final JButton testButton = new JButton("Test Dink");
+    private final JLabel testStatusLabel = new JLabel();
 
     private Runnable refreshHandler = () -> {
     };
+
+    private Runnable testHandler = () -> {
+    };
+
+    /**
+     * Long enough that a mistaken double press cannot put two messages in an organizer's
+     * channel, short enough to re-test straight after fixing a setting.
+     */
+    private static final Duration TEST_COOLDOWN = Duration.ofSeconds(30);
+
+    /** When the last test was handed to Dink; null until one has been. EDT-owned. */
+    @Nullable
+    private Instant lastTestAt;
 
     @Inject
     BingoPanel(ItemManager itemManager) {
@@ -72,19 +134,40 @@ public class BingoPanel extends PluginPanel {
         headerLabel.setFont(FontManager.getRunescapeBoldFont());
         headerLabel.setForeground(Color.WHITE);
         statusLabel.setFont(FontManager.getRunescapeSmallFont());
-        statusLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+        statusLabel.setForeground(LIVE_STATUS_COLOR);
 
         JPanel titles = new JPanel();
         titles.setLayout(new BoxLayout(titles, BoxLayout.Y_AXIS));
         titles.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        freshnessLabel.setFont(FontManager.getRunescapeSmallFont());
+        freshnessLabel.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+        freshnessLabel.setVisible(false);
+
         titles.add(headerLabel);
         titles.add(statusLabel);
+        titles.add(freshnessLabel);
 
         refreshButton.setFocusPainted(false);
         refreshButton.addActionListener(e -> refreshHandler.run());
 
+        testButton.setFocusPainted(false);
+        testButton.setFont(FontManager.getRunescapeSmallFont());
+        testButton.setToolTipText("Post a test notification to Dink. Claims nothing and "
+            + "changes no tile.");
+        testButton.addActionListener(e -> confirmAndSendTest());
+
+        testStatusLabel.setFont(FontManager.getRunescapeSmallFont());
+        testStatusLabel.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+        testStatusLabel.setVisible(false);
+
         header.add(titles, BorderLayout.CENTER);
         header.add(refreshButton, BorderLayout.EAST);
+
+        JPanel footer = new JPanel(new BorderLayout(0, 4));
+        footer.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        footer.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
+        footer.add(testButton, BorderLayout.NORTH);
+        footer.add(testStatusLabel, BorderLayout.CENTER);
 
         itemsPanel.setLayout(new GridBagLayout());
         itemsPanel.setBackground(ColorScheme.DARK_GRAY_COLOR);
@@ -95,10 +178,68 @@ public class BingoPanel extends PluginPanel {
 
         add(header, BorderLayout.NORTH);
         add(itemsScrollPane, BorderLayout.CENTER);
+        add(footer, BorderLayout.SOUTH);
     }
 
     public void setRefreshHandler(Runnable handler) {
         this.refreshHandler = handler;
+    }
+
+    public void setTestHandler(Runnable handler) {
+        this.testHandler = handler;
+    }
+
+    /**
+     * Asks before posting, because the message lands in whatever channel the event uses and
+     * nobody else can tell a stray test from a mistake.
+     */
+    private void confirmAndSendTest() {
+        int choice = JOptionPane.showConfirmDialog(
+            this,
+            "Post a test notification to Dink?\n\n"
+                + "It claims nothing and changes no tile, but it does appear in the Discord "
+                + "channel your webhook points at.",
+            "Test Dink notification",
+            JOptionPane.OK_CANCEL_OPTION,
+            JOptionPane.QUESTION_MESSAGE);
+        if (choice == JOptionPane.OK_OPTION) {
+            sendTest();
+        }
+    }
+
+    /**
+     * Hands a test to the plugin unless one was just sent. Returns whether it was sent.
+     * <p>
+     * The wording afterwards deliberately stops at "handed to Dink". Dink acknowledges
+     * nothing, so a panel that said "delivered" would be the same false confidence the test
+     * exists to remove -- the message appearing in Discord is the only confirmation.
+     */
+    boolean sendTest() {
+        Instant now = clock.instant();
+        if (lastTestAt != null && Duration.between(lastTestAt, now).compareTo(TEST_COOLDOWN) < 0) {
+            return false;
+        }
+        lastTestAt = now;
+        testButton.setEnabled(false);
+        // The width hint is what makes a long HTML label wrap instead of clipping in the
+        // fixed-width sidebar.
+        testStatusLabel.setText("<html><body style='width:100%'>Sent to Dink at "
+            + escape(timeFormat.format(now))
+            + ". Dink does not confirm delivery \u2014 check Discord.</body></html>");
+        testStatusLabel.setVisible(true);
+
+        Timer reEnable = new Timer((int) TEST_COOLDOWN.toMillis(),
+            e -> testButton.setEnabled(true));
+        reEnable.setRepeats(false);
+        reEnable.start();
+
+        testHandler.run();
+        return true;
+    }
+
+    /** The test line exactly as a player reads it; empty when no test has been sent. */
+    String testStatusText() {
+        return testStatusLabel.isVisible() ? testStatusLabel.getText() : "";
     }
 
     /** Safe to call from any thread. */
@@ -108,12 +249,83 @@ public class BingoPanel extends PluginPanel {
         BoardView boardView,
         boolean hideCompletedTiles
     ) {
+        showingBoard = configured && board.isConfigured();
+        SwingUtilities.invokeLater(() ->
+            renderOnEdt(board, configured, boardView, hideCompletedTiles));
+    }
+
+    /**
+     * A lifecycle-current board arrived. Safe to call from any thread.
+     * <p>
+     * Separate from {@link #render} on purpose: the board is also re-rendered when the player
+     * switches view or toggles hidden tiles, and stamping those as a refresh would tell them
+     * the board is current when nothing was fetched.
+     */
+    public void markRefreshSucceeded() {
+        lastSuccess = clock.instant();
+        staleReason = null;
+        freshness = Freshness.UPDATED;
+        SwingUtilities.invokeLater(this::updateFreshnessLabel);
+    }
+
+    /**
+     * A refresh is under way. Safe to call from any thread.
+     * <p>
+     * Deliberately touches only the freshness line. Blanking the rows here is what made a
+     * periodic refresh flicker the whole board, and it throws away something readable in
+     * exchange for nothing.
+     */
+    public void markRefreshing() {
+        freshness = Freshness.REFRESHING;
+        SwingUtilities.invokeLater(this::updateFreshnessLabel);
+    }
+
+    /**
+     * The round trip failed and the rows on screen are the last good board. Safe to call from
+     * any thread.
+     * <p>
+     * Distinct from a rejection: the board is probably still correct, so it keeps its last
+     * success time and claims keep being submitted.
+     */
+    public void markRefreshFailed() {
+        freshness = Freshness.FAILED;
+        SwingUtilities.invokeLater(this::updateFreshnessLabel);
+    }
+
+    /** Forget how fresh anything was, for logout, a token change, or shutdown. */
+    public void resetFreshness() {
+        lastSuccess = null;
+        staleReason = null;
+        freshness = Freshness.UNKNOWN;
+        SwingUtilities.invokeLater(this::updateFreshnessLabel);
+    }
+
+    /**
+     * Keep the last known board on screen, clearly labelled as no longer live. Safe to call
+     * from any thread.
+     * <p>
+     * Used when the backend answered and refused a refresh after an earlier one succeeded.
+     * The rows are still useful reference, but presenting them as current would hide the fact
+     * that the plugin has stopped claiming drops, which is exactly what a player needs to know
+     * when an organizer rotates the event token mid-event.
+     */
+    public void renderStale(
+        BingoBoard board,
+        boolean configured,
+        BoardView boardView,
+        boolean hideCompletedTiles,
+        @Nullable String backendError
+    ) {
+        staleReason = BingoErrors.describeBoardError(backendError);
+        freshness = Freshness.REJECTED;
+        showingBoard = configured && board.isConfigured();
         SwingUtilities.invokeLater(() ->
             renderOnEdt(board, configured, boardView, hideCompletedTiles));
     }
 
     /** Safe to call from any thread. */
     public void renderLoading() {
+        showingBoard = false;
         SwingUtilities.invokeLater(() -> renderMessage(
             "Loading board",
             "Fetching your team's tiles\u2026"
@@ -127,6 +339,7 @@ public class BingoPanel extends PluginPanel {
      * connection actually explains.
      */
     public void renderLoadError() {
+        showingBoard = false;
         SwingUtilities.invokeLater(() -> renderMessage(
             "Couldn't load board",
             "Check your connection, then press Refresh"
@@ -140,56 +353,18 @@ public class BingoPanel extends PluginPanel {
      */
     public void renderLoadError(String backendError) {
         String reason = describeBackendError(backendError);
+        showingBoard = false;
         SwingUtilities.invokeLater(() -> renderMessage("Couldn't load board", reason));
     }
 
     /**
      * Turns a backend {@code error} value into something an organizer can act on.
      * <p>
-     * An unrecognized value is a custom backend's free text, so it is never rendered raw: it is
-     * prefixed, collapsed to one line, and truncated. The prefix also keeps the reason from
-     * ever starting with {@code <html>}, which Swing would otherwise render as markup, and the
-     * untruncated value is already in the log for anyone who needs the rest of it.
+     * The wording lives in {@link BingoErrors} alongside the claim-failure phrasing for the
+     * same reason, so the two surfaces cannot drift apart.
      */
     static String describeBackendError(@Nullable String backendError) {
-        String error = backendError == null ? "" : backendError.trim();
-        switch (error) {
-            case "":
-                return "Check your connection, then press Refresh";
-            case "bad_token":
-                return "Event token rejected. Check the token on the Config tab.";
-            case "lock_timeout":
-                return "The backend is busy. Press Refresh to try again.";
-            case "bad_json":
-            case "bad_request":
-            case "post_required":
-            case "unknown_action":
-                return "The backend rejected the request. Check the Apps Script deployment.";
-            default:
-                return "Backend error: " + summarize(error);
-        }
-    }
-
-    /** Collapses a backend reason to a single bounded line. */
-    private static String summarize(String error) {
-        StringBuilder out = new StringBuilder(error.length());
-        boolean pendingSpace = false;
-        for (int i = 0; i < error.length(); i++) {
-            char c = error.charAt(i);
-            if (Character.isWhitespace(c) || Character.isISOControl(c)) {
-                pendingSpace = out.length() > 0;
-                continue;
-            }
-            if (out.length() + (pendingSpace ? 2 : 1) > MAX_REASON_LENGTH) {
-                return out.append('\u2026').toString();
-            }
-            if (pendingSpace) {
-                out.append(' ');
-                pendingSpace = false;
-            }
-            out.append(c);
-        }
-        return out.toString();
+        return BingoErrors.describeBoardError(backendError);
     }
 
     private void renderOnEdt(
@@ -202,21 +377,35 @@ public class BingoPanel extends PluginPanel {
 
         if (!configured) {
             headerLabel.setText("Not configured");
+            statusLabel.setForeground(LIVE_STATUS_COLOR);
             statusLabel.setText("Set a Backend URL in the config");
+            freshnessLabel.setVisible(false);
             refreshItemsPanel();
             return;
         }
 
         if (!board.isConfigured()) {
             headerLabel.setText("No team");
+            statusLabel.setForeground(LIVE_STATUS_COLOR);
             statusLabel.setText("Your RSN is not on the Teams tab");
+            freshnessLabel.setVisible(false);
             refreshItemsPanel();
             return;
         }
 
-        headerLabel.setText(board.getTeam());
-        statusLabel.setText(board.getRemainingCount() + " of " + board.getTiles().size() + " tiles left"
-            + (board.isEventOpen() ? "" : " (event closed)"));
+        headerLabel.setText(staleReason == null
+            ? board.getTeam() : board.getTeam() + " \u2014 not live");
+        if (staleReason == null) {
+            statusLabel.setForeground(LIVE_STATUS_COLOR);
+            statusLabel.setText(board.getRemainingCount() + " of " + board.getTiles().size()
+                + " tiles left" + (board.isEventOpen() ? "" : " (event closed)"));
+        } else {
+            statusLabel.setForeground(STALE_COLOR);
+            // The reason is bounded and single-line, and never leads, so a backend-controlled
+            // string cannot be read as Swing markup or push the tile count off screen.
+            statusLabel.setText("Not claiming drops \u2014 " + staleReason);
+        }
+        updateFreshnessLabel();
 
         GridBagConstraints c = new GridBagConstraints();
         c.fill = GridBagConstraints.HORIZONTAL;
@@ -266,8 +455,68 @@ public class BingoPanel extends PluginPanel {
     private void renderMessage(String header, String status) {
         SwingUtil.fastRemoveAll(itemsPanel);
         headerLabel.setText(header);
+        statusLabel.setForeground(LIVE_STATUS_COLOR);
         statusLabel.setText(status);
+        // There are no rows on screen, so there is nothing for a freshness line to describe.
+        freshnessLabel.setVisible(false);
         refreshItemsPanel();
+    }
+
+    /**
+     * Describe how current the rows are, in the player's own locale and time zone.
+     * <p>
+     * Always an absolute time rather than "just now". Nothing ticks this label, so a relative
+     * phrase would still read "just now" twenty minutes later, which is worse than no
+     * indicator at all during an event.
+     */
+    private void updateFreshnessLabel() {
+        String text = freshnessText();
+        freshnessLabel.setText(text);
+        freshnessLabel.setVisible(!text.isEmpty());
+    }
+
+    /**
+     * The freshness line exactly as a player reads it, derived from the panel's own state.
+     * <p>
+     * Deliberately not read back out of the label. Swing fields are owned by the EDT, so
+     * reading them from anywhere else sees whatever was published last, which made this
+     * untestable and would make any future caller subtly wrong.
+     */
+    String freshnessText() {
+        if (!showingBoard) {
+            return "";
+        }
+        String text;
+        switch (freshness) {
+            case REFRESHING:
+                text = "Refreshing\u2026";
+                break;
+            case UPDATED:
+                text = "Updated " + formatLastSuccess();
+                break;
+            case FAILED:
+                text = lastSuccess == null ? "Refresh failed"
+                    : "Last updated " + formatLastSuccess() + " \u2014 refresh failed";
+                break;
+            case REJECTED:
+                // The status line above already carries the reason and the warning, so this
+                // only has to say how old the rows are.
+                text = lastSuccess == null ? "" : "Last updated " + formatLastSuccess();
+                break;
+            default:
+                text = "";
+                break;
+        }
+        return text;
+    }
+
+    private String formatLastSuccess() {
+        return lastSuccess == null ? "never" : timeFormat.format(lastSuccess);
+    }
+
+    /** Test seam so a rendered time does not depend on the wall clock. */
+    void setClock(Clock clock) {
+        this.clock = clock;
     }
 
     private void refreshItemsPanel() {

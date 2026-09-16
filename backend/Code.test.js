@@ -20,11 +20,14 @@ const sheets = {
   Audit: [
     ["ts", "rsn", "item_id", "result", "notes", "raw_payload", "tile_id"]
   ],
+  Attempts: [
+    ["claim_id", "rsn", "team", "item_id", "status", "tile_id", "tile_name", "item_name",
+      "complete", "recorded_at"]
+  ],
   Config: [
     ["key", "value"],
     ["token", "participant-secret"],
-    ["admin_token", "organizer-secret"],
-    ["announce_from_backend", "false"]
+    ["admin_token", "organizer-secret"]
   ]
 };
 
@@ -32,6 +35,9 @@ const sheets = {
 // slow round trip, so anything recorded here lengthens the hold time for every other claim.
 let lockDepth = 0;
 const sheetReadsUnderLock = [];
+
+// Rejected-auth diagnostics live here instead of the Audit tab; see noteRejectedAuth.
+const scriptCache = {};
 
 function fakeSheet(name) {
   return {
@@ -89,6 +95,23 @@ const context = {
             held = false;
             lockDepth--;
           }
+        }
+      };
+    }
+  },
+  UrlFetchApp: {
+    fetch(url) {
+      throw new Error(
+        "the backend must not make outbound requests; see the announcement boundary in AGENTS.md"
+      );
+    }
+  },
+  CacheService: {
+    getScriptCache() {
+      return {
+        get: key => (key in scriptCache ? scriptCache[key] : null),
+        put(key, value) {
+          scriptCache[key] = String(value);
         }
       };
     }
@@ -257,7 +280,7 @@ const lockScoped = output(context.handleClaim({
 assert.strictEqual(lockScoped.status, "claimed");
 assert.deepStrictEqual(
   Array.from(new Set(sheetReadsUnderLock)).sort(),
-  ["Claims"],
+  ["Attempts", "Claims"],
   "only mutable state may be read while the script lock is held"
 );
 assert.strictEqual(lockDepth, 0, "handleClaim must release the lock it took");
@@ -280,7 +303,7 @@ const strangerClaim = output(context.handleClaim({
 assert.strictEqual(strangerClaim.status, "not_on_team");
 assert.deepStrictEqual(
   Array.from(new Set(sheetReadsUnderLock)).sort(),
-  ["Claims"],
+  ["Attempts", "Claims"],
   "a not_on_team rejection must not read Items or Teams under the lock"
 );
 
@@ -295,7 +318,7 @@ const offBoardClaim = output(context.handleClaim({
 assert.strictEqual(offBoardClaim.status, "not_on_board");
 assert.deepStrictEqual(
   Array.from(new Set(sheetReadsUnderLock)).sort(),
-  ["Claims"],
+  ["Attempts", "Claims"],
   "a not_on_board rejection must not read Items or Teams under the lock"
 );
 assert.strictEqual(lockDepth, 0, "the rejection paths release the lock");
@@ -539,5 +562,625 @@ assert(
   generatedFormula("E26").includes('progress&\"/\"&needed'),
   "the team matrix must display partial K-of-N progress"
 );
+
+// ---------------------------------------------------------------------------
+// Rejected authentication must not write to the authoritative spreadsheet (#35).
+//
+// The /exec deployment has to be public, so anyone who learns the URL can post invalid-token
+// requests forever without knowing the event token. Auditing each attempt would let that
+// traffic grow the sheet, burn write quota, and take the script lock away from real claims.
+// ---------------------------------------------------------------------------
+
+const auditRowsBeforeBadAuth = sheets.Audit.length;
+const claimRowsBeforeBadAuth = sheets.Claims.length;
+
+for (let attempt = 0; attempt < 25; attempt++) {
+  const rejected = output(context.handleClaim({
+    token: "not-the-event-token",
+    rsn: "Jake",
+    itemId: 4151,
+    itemName: "Abyssal whip",
+    claimId: "flood-" + attempt
+  }));
+  assert.strictEqual(rejected.error, "bad_token");
+}
+
+assert.strictEqual(
+  sheets.Audit.length,
+  auditRowsBeforeBadAuth,
+  "repeated invalid-token claims must not append Audit rows"
+);
+assert.strictEqual(
+  sheets.Claims.length,
+  claimRowsBeforeBadAuth,
+  "an invalid-token claim must not append a Claims row"
+);
+assert.strictEqual(lockDepth, 0, "a rejected claim must not leave the script lock held");
+
+const badBoard = output(context.handleBoard({token: "not-the-event-token", rsn: "Jake"}));
+assert.strictEqual(badBoard.error, "bad_token");
+
+const badAdmin = output(context.handleUnclaim({
+  admin_token: "not-the-admin-token",
+  team: "Team One",
+  tile_id: "rare-drop"
+}));
+assert.strictEqual(badAdmin.error, "bad_admin_token");
+assert.strictEqual(
+  sheets.Audit.length,
+  auditRowsBeforeBadAuth,
+  "invalid board and admin credentials must not append Audit rows either"
+);
+assert.strictEqual(
+  sheets.Claims.length,
+  claimRowsBeforeBadAuth,
+  "a rejected unclaim must not delete or add Claims rows"
+);
+
+// Visibility is retained out-of-band, bounded by a coarse time bucket rather than one record
+// per attempt, and never records the attempted credential.
+const rejectionKeys = Object.keys(scriptCache);
+assert.strictEqual(
+  rejectionKeys.length,
+  2,
+  "rejected-auth counters are bucketed, not one entry per attempt: " + rejectionKeys.join(", ")
+);
+const participantKey = rejectionKeys.find(key => key.includes("participant"));
+assert.strictEqual(
+  scriptCache[participantKey],
+  "26",
+  "every rejected participant-token attempt is counted in its bucket"
+);
+const cachedValues = rejectionKeys.join(" ") + " " + Object.values(scriptCache).join(" ");
+assert(
+  !cachedValues.includes("not-the-event-token") && !cachedValues.includes("not-the-admin-token"),
+  "the attempted credential must never be stored"
+);
+
+// A valid token with an unusable payload is authenticated traffic and stays auditable.
+const badRequest = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "",
+  itemId: "not-a-number"
+}));
+assert.strictEqual(badRequest.error, "bad_request");
+assert.strictEqual(
+  sheets.Audit.length,
+  auditRowsBeforeBadAuth + 1,
+  "authenticated rejections remain auditable"
+);
+
+// ---------------------------------------------------------------------------
+// The backend never announces (#32).
+//
+// Announcing from Apps Script meant calling UrlFetchApp while the script lock was held, so a
+// slow or rate-limited Discord endpoint could extend the hold and turn concurrent drops into
+// lock_timeout retries. The announcement is the client's job regardless: only the plugin can
+// screenshot the drop. The UrlFetchApp stub above throws, so any claim path that tried to
+// reach the network would fail this suite rather than silently regress.
+// ---------------------------------------------------------------------------
+
+assert.strictEqual(
+  typeof context.postDiscord,
+  "undefined",
+  "postDiscord must not exist; the backend has no announcement path"
+);
+
+// Even with the retired Config keys still present on an organizer's sheet, a claim must
+// neither read them nor act on them.
+sheets.Config.push(["announce_from_backend", "true"]);
+sheets.Config.push(["discord_webhook", "https://discord.invalid/webhook"]);
+const claimWithLegacyAnnounceConfig = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 11832,
+  itemName: "Bandos chestplate",
+  claimId: "no-backend-announce"
+}));
+assert.strictEqual(
+  claimWithLegacyAnnounceConfig.status,
+  "claimed",
+  "a claim still succeeds when retired announcement keys linger in Config"
+);
+assert.strictEqual(lockDepth, 0, "the claim released the script lock");
+sheets.Config.pop();
+sheets.Config.pop();
+
+// setupSheet must not reintroduce a place to paste a webhook into the sheet.
+const setupSource = code.slice(code.indexOf("function setupSheet"));
+assert(
+  !setupSource.includes("discord_webhook") && !setupSource.includes("announce_from_backend"),
+  "setupSheet must not seed retired announcement Config keys"
+);
+
+// ---------------------------------------------------------------------------
+// Teams validation and display casing (#38).
+//
+// resolveTeam used to return the first row whose normalized name matched, so two rows for the
+// same player silently resolved to whichever came first, and a half-filled row looked exactly
+// like an unlisted player. Teams is as load-bearing as Items and now fails just as visibly.
+// ---------------------------------------------------------------------------
+
+const teamsBeforeRosterTests = sheets.Teams.map(row => row.slice());
+const claimsBeforeRosterTests = sheets.Claims.map(row => row.slice());
+
+// RuneScape names ignore case, treat _ and space as equivalent, and never contain runs of
+// separators. All of these are one player.
+["Jake Steele", "jake_steele", "JAKE__STEELE", "  Jake   Steele  ", "jake_ steele"]
+  .forEach(variant => {
+    assert.strictEqual(
+      context.normalizeRsn(variant),
+      "jake steele",
+      variant + " must normalize to a single lookup key"
+    );
+  });
+assert.strictEqual(context.normalizeRsn("  "), null, "a blank name has no lookup key");
+assert.strictEqual(context.normalizeRsn(null), null);
+
+// Two spellings of one name on different teams is ambiguous configuration, not a silent
+// first-row win. The error names both rows so the organizer can find them.
+sheets.Teams = [
+  ["rsn", "team"],
+  ["Jake_Steele", "Team One"],
+  ["jake steele", "Team Two"]
+];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake_Steele"}),
+  /Teams rows 2 and 3 are the same RuneScape name/,
+  "duplicate normalized RSNs must fail with both row numbers"
+);
+
+// A name with no team reads as an unlisted player unless it is called out explicitly.
+sheets.Teams = [["rsn", "team"], ["Jake_Steele", ""]];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake_Steele"}),
+  /Teams row 2 has rsn "Jake_Steele" with no team/,
+  "a nonblank rsn with a blank team must identify its row"
+);
+
+sheets.Teams = [["rsn", "team"], ["", "Team One"]];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake"}),
+  /Teams row 2 assigns a team with no rsn/
+);
+
+// Trailing blank rows are ordinary spreadsheet padding and must not fail the event.
+sheets.Teams = [["rsn", "team"], ["Jake_Steele", "Team One"], ["", ""], ["", ""]];
+const paddedBoard = output(context.handleBoard({
+  token: "participant-secret",
+  rsn: "jake steele"
+}));
+assert.strictEqual(paddedBoard.status, "ok");
+assert.strictEqual(
+  paddedBoard.team,
+  "Team One",
+  "blank padding rows are skipped and lookup stays separator-insensitive"
+);
+
+// Claims record the organizer's spelling, not the normalized lookup key, so the sidebar and
+// Leaderboard show the name a human recognises.
+sheets.Claims = [claimsBeforeRosterTests[0].slice()];
+const casedClaim = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "JAKE__STEELE",
+  itemId: 11832,
+  itemName: "Bandos chestplate",
+  claimId: "display-casing-1"
+}));
+assert.strictEqual(casedClaim.status, "claimed");
+assert.strictEqual(
+  casedClaim.claimedBy,
+  "Jake_Steele",
+  "the claim response reports the canonical Teams spelling"
+);
+const rsnColumn = claimsBeforeRosterTests[0].indexOf("rsn");
+assert.strictEqual(
+  sheets.Claims[1][rsnColumn],
+  "Jake_Steele",
+  "the Claims row stores the canonical Teams spelling"
+);
+const casedBoard = output(context.handleBoard({
+  token: "participant-secret",
+  rsn: "jake_steele"
+}));
+const casedTile = casedBoard.tiles.find(tile => tile.id === "11832");
+assert.strictEqual(casedTile.claimedBy, "Jake_Steele", "the board shows the canonical spelling");
+
+// A Teams tab that goes ambiguous mid-event must not strand a claim the Sheet already
+// committed. The client treats a rejection as resolved, so a retry that failed here would
+// lose the announcement for a real claim -- the same reason not_on_team sits behind the
+// replay check.
+sheets.Teams = [
+  ["rsn", "team"],
+  ["Jake_Steele", "Team One"],
+  ["jake steele", "Team Two"]
+];
+const replayThroughBadRoster = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "JAKE__STEELE",
+  itemId: 11832,
+  claimId: "display-casing-1"
+}));
+assert.strictEqual(replayThroughBadRoster.status, "claimed");
+assert.strictEqual(replayThroughBadRoster.replay, true);
+assert.strictEqual(
+  replayThroughBadRoster.claimedBy,
+  "Jake_Steele",
+  "the replay reports the spelling recorded at claim time"
+);
+assert.strictEqual(lockDepth, 0, "the replay released the script lock");
+
+// A brand new claim against the same ambiguous roster still fails visibly.
+assert.throws(
+  () => context.handleClaim({
+    token: "participant-secret",
+    rsn: "Jake_Steele",
+    itemId: 4151,
+    itemName: "Abyssal whip",
+    claimId: "ambiguous-roster-1"
+  }),
+  /Teams rows 2 and 3 are the same RuneScape name/,
+  "a fresh claim must not pick a team out of an ambiguous roster"
+);
+assert.strictEqual(lockDepth, 0, "the failed claim released the script lock");
+
+sheets.Teams = teamsBeforeRosterTests;
+sheets.Claims = claimsBeforeRosterTests;
+
+// ---------------------------------------------------------------------------
+// Claims rows are validated against the Items catalog (#34).
+//
+// Tile completion counts contributions, so a mistyped manual Claims row naming an unrelated
+// item used to advance or complete a tile and award points. Claims is the documented
+// correction surface, so a bad edit has to fail visibly instead of changing the result.
+// ---------------------------------------------------------------------------
+
+const claimsBeforeIntegrity = sheets.Claims.map(row => row.slice());
+const claimRow = (team, tileId, tileName, itemId, itemName, claimId) =>
+  [team, tileId, tileName, itemId, itemName, "Jake", new Date(), claimId, "", 1, true];
+
+// A tile that no longer exists in Items must not silently count or silently vanish.
+sheets.Claims = [claimsBeforeIntegrity[0].slice(),
+  claimRow("Team One", "ghost-tile", "Deleted tile", 4151, "Abyssal whip", "orphan-1")];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake"}),
+  /Claims row 2 credits tile_id "ghost-tile", which is not in Items/,
+  "an unknown tile_id must fail with its Claims row"
+);
+
+// The whip is an option of rare-drop, not of tile 11832. Counting it toward 11832 would
+// complete a tile nobody earned.
+sheets.Claims = [claimsBeforeIntegrity[0].slice(),
+  claimRow("Team One", "11832", "Bandos chestplate", 4151, "Abyssal whip", "wrong-tile-1")];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake"}),
+  /Claims row 2 credits item_id 4151 to tile_id "11832", which does not list that item/,
+  "an item credited to the wrong tile must fail with its Claims row"
+);
+
+// New claims fail closed while Claims integrity is invalid rather than counting the bad row.
+const claimsLengthWhileInvalid = sheets.Claims.length;
+assert.throws(
+  () => context.handleClaim({
+    token: "participant-secret",
+    rsn: "Jake",
+    itemId: 21034,
+    itemName: "Dexterous prayer scroll",
+    claimId: "while-invalid-1"
+  }),
+  /Claims row 2 credits item_id 4151/,
+  "a new claim must not be evaluated against invalid Claims state"
+);
+assert.strictEqual(
+  sheets.Claims.length,
+  claimsLengthWhileInvalid,
+  "the failed claim wrote nothing"
+);
+assert.strictEqual(lockDepth, 0, "the failed claim released the script lock");
+
+// Admin unclaim is how the organizer repairs this, so it must keep working while the rows it
+// is being asked to remove are exactly the ones failing validation.
+const repaired = output(context.handleUnclaim({
+  admin_token: "organizer-secret",
+  team: "Team One",
+  tile_id: "11832"
+}));
+assert.strictEqual(repaired.status, "unclaimed");
+assert.strictEqual(repaired.removed, 1);
+assert.strictEqual(
+  sheets.Claims.length,
+  1,
+  "admin unclaim removed the invalid contribution"
+);
+const boardAfterRepair = output(context.handleBoard({token: "participant-secret", rsn: "Jake"}));
+assert.strictEqual(
+  boardAfterRepair.status,
+  "ok",
+  "the board recovers once the invalid row is removed"
+);
+
+// An orphaned row whose tile is gone from Items is removable the same way.
+sheets.Claims = [claimsBeforeIntegrity[0].slice(),
+  claimRow("Team One", "ghost-tile", "Deleted tile", 4151, "Abyssal whip", "orphan-2")];
+const orphanRemoved = output(context.handleUnclaim({
+  admin_token: "organizer-secret",
+  team: "Team One",
+  tile_id: "ghost-tile"
+}));
+assert.strictEqual(orphanRemoved.status, "unclaimed");
+assert.strictEqual(orphanRemoved.removed, 1);
+assert.strictEqual(sheets.Claims.length, 1, "the orphaned row is gone");
+
+// Ids are authoritative; display text is historical. Renaming a tile or item in Items must
+// not invalidate the claims already recorded under the old names.
+sheets.Claims = [claimsBeforeIntegrity[0].slice(),
+  claimRow("Team One", "rare-drop", "Any rare drop (old name)", 4151,
+    "Abyssal whip (old name)", "renamed-1")];
+const renamedBoard = output(context.handleBoard({token: "participant-secret", rsn: "Jake"}));
+assert.strictEqual(renamedBoard.status, "ok", "renamed display text is not an integrity error");
+const renamedTile = renamedBoard.tiles.find(tile => tile.id === "rare-drop");
+assert.strictEqual(renamedTile.claimed, true);
+assert.strictEqual(
+  renamedTile.claimedItem.name,
+  "Abyssal whip (old name)",
+  "the historical name recorded at claim time is preserved"
+);
+
+// Structural duplicates still fail, and now say which row.
+sheets.Claims = [claimsBeforeIntegrity[0].slice(),
+  claimRow("Team One", "rare-drop", "Any rare drop", 4151, "Abyssal whip", "dupe-a"),
+  claimRow("Team One", "rare-drop", "Any rare drop", 4151, "Abyssal whip", "dupe-b")];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake"}),
+  /multiple Claims rows for team Team One, tile_id rare-drop, item_id 4151 \(Claims row 3\)/,
+  "a duplicate contribution names the offending row"
+);
+
+sheets.Claims = [claimsBeforeIntegrity[0].slice(),
+  claimRow("Team One", "rare-drop", "Any rare drop", 4151, "Abyssal whip", "same-id"),
+  claimRow("Team One", "11832", "Bandos chestplate", 11832, "Bandos chestplate", "same-id")];
+assert.throws(
+  () => context.handleBoard({token: "participant-secret", rsn: "Jake"}),
+  /claim_id appears more than once: same-id \(Claims row 3\)/,
+  "a duplicate claim_id names the offending row"
+);
+
+sheets.Claims = claimsBeforeIntegrity;
+
+// The organizer looks at the Leaderboard, not at an HTTP response, so the same check is
+// surfaced there.
+const integrityFormula = generatedFormula("G5");
+assert(
+  integrityFormula.includes("COUNTIFS(Items!A2:A,Claims!B2:B,Items!C2:C,Claims!D2:D)=0"),
+  "the leaderboard must flag Claims rows whose tile/item pair is absent from Items"
+);
+assert(
+  integrityFormula.includes("Claims!A2:A<>"),
+  "blank Claims padding rows must not be reported as invalid"
+);
+
+// ---------------------------------------------------------------------------
+// Terminal rejections are idempotent across a lost response (#36).
+//
+// Accepted contributions already replay from their Claims row. Rejections went only to Audit,
+// which is never consulted, so a retry of the same claimId after a lost HTTP response was
+// re-evaluated against whatever the state had become by then.
+// ---------------------------------------------------------------------------
+
+const claimsBeforeLedger = sheets.Claims.map(row => row.slice());
+const itemsBeforeLedger = sheets.Items.map(row => row.slice());
+const teamsBeforeLedger = sheets.Teams.map(row => row.slice());
+sheets.Claims = [claimsBeforeLedger[0].slice()];
+
+// A drop rejected just before event_start used to be accepted by its own retry a moment
+// after the event opened, silently extending the event for one player.
+sheets.Config.push(["event_start", new Date(Date.now() + 60 * 60 * 1000)]);
+const rejectedBeforeStart = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "lost-response-start"
+}));
+assert.strictEqual(rejectedBeforeStart.status, "event_closed");
+sheets.Config.pop();
+
+const retryAfterEventOpened = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "lost-response-start"
+}));
+assert.strictEqual(
+  retryAfterEventOpened.status,
+  "event_closed",
+  "a retry must return the original outcome even though the event has since opened"
+);
+assert.strictEqual(retryAfterEventOpened.replay, true);
+assert.strictEqual(
+  sheets.Claims.length,
+  1,
+  "the replayed rejection must not create a Claims row"
+);
+
+// A fresh drop of the same item is a different operation and is accepted normally.
+const freshAfterOpen = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "fresh-after-open"
+}));
+assert.strictEqual(
+  freshAfterOpen.status,
+  "claimed",
+  "a new claim id is evaluated against current state, not the ledger"
+);
+
+// A roster edit between attempts used to turn not_on_team into an accepted claim.
+sheets.Claims = [claimsBeforeLedger[0].slice()];
+sheets.Teams = [["rsn", "team"], ["someone else", "Team One"]];
+const rejectedOffRoster = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "lost-response-team"
+}));
+assert.strictEqual(rejectedOffRoster.status, "not_on_team");
+
+sheets.Teams = [["rsn", "team"], ["jake", "Team One"]];
+const retryAfterRosterFixed = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "lost-response-team"
+}));
+assert.strictEqual(
+  retryAfterRosterFixed.status,
+  "not_on_team",
+  "a retry must not become an accepted claim because Teams changed"
+);
+assert.strictEqual(retryAfterRosterFixed.replay, true);
+assert.strictEqual(sheets.Claims.length, 1, "the replayed rejection wrote nothing");
+
+// The same for a board edit between attempts.
+const rejectedOffBoard = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 995,
+  itemName: "Coins",
+  claimId: "lost-response-board"
+}));
+assert.strictEqual(rejectedOffBoard.status, "not_on_board");
+
+sheets.Items.push(["coins", "Coins", 995, "Coins", 1, 1, ""]);
+const retryAfterBoardGrew = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 995,
+  itemName: "Coins",
+  claimId: "lost-response-board"
+}));
+assert.strictEqual(
+  retryAfterBoardGrew.status,
+  "not_on_board",
+  "a retry must not become an accepted claim because Items changed"
+);
+assert.strictEqual(retryAfterBoardGrew.replay, true);
+assert.strictEqual(
+  retryAfterBoardGrew.itemName,
+  "Coins",
+  "the replay carries the fields the client needs to describe the outcome"
+);
+sheets.Items = itemsBeforeLedger.map(row => row.slice());
+
+// A duplicate is terminal too, and replays with the fields describe() renders.
+sheets.Claims = [claimsBeforeLedger[0].slice()];
+output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "ledger-winner"
+}));
+const duplicateRejection = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 21034,
+  itemName: "Dexterous prayer scroll",
+  claimId: "lost-response-duplicate"
+}));
+assert.strictEqual(duplicateRejection.status, "duplicate");
+
+const retriedDuplicate = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 21034,
+  itemName: "Dexterous prayer scroll",
+  claimId: "lost-response-duplicate"
+}));
+assert.strictEqual(retriedDuplicate.status, "duplicate");
+assert.strictEqual(retriedDuplicate.replay, true);
+assert.strictEqual(
+  retriedDuplicate.complete,
+  true,
+  "the replayed duplicate still reports that the tile was already complete"
+);
+assert.strictEqual(retriedDuplicate.tileName, "Any rare drop");
+
+// Claims stays authoritative: an accepted contribution replays from its own row, never from
+// the ledger, because a row in Claims means the contribution really happened.
+const acceptedReplay = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  claimId: "ledger-winner"
+}));
+assert.strictEqual(acceptedReplay.status, "claimed");
+assert.strictEqual(acceptedReplay.replay, true);
+
+// A claim id names one operation. Reusing it for a different player or item must fail closed
+// rather than report somebody else's outcome.
+const conflictingRsn = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "someone else",
+  itemId: 21034,
+  itemName: "Dexterous prayer scroll",
+  claimId: "lost-response-duplicate"
+}));
+assert.strictEqual(conflictingRsn.error, "claim_id_conflict");
+
+const conflictingItem = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 11832,
+  itemName: "Bandos chestplate",
+  claimId: "lost-response-duplicate"
+}));
+assert.strictEqual(conflictingItem.error, "claim_id_conflict");
+assert.strictEqual(lockDepth, 0, "the conflict path released the script lock");
+
+// The ledger holds operational fields only.
+const ledgerText = JSON.stringify(sheets.Attempts);
+["participant-secret", "organizer-secret", "discord", "token"].forEach(secret => {
+  assert(
+    !ledgerText.includes(secret),
+    "the Attempts ledger must never store credentials: found " + secret
+  );
+});
+
+// A deployment that has not re-run setupSheet has no Attempts tab. Claims must keep working
+// with the old semantics rather than every claim failing mid-event on a missing tab.
+const ledgerRows = sheets.Attempts;
+delete sheets.Attempts;
+sheets.Claims = [claimsBeforeLedger[0].slice()];
+const legacyRejection = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 995,
+  itemName: "Coins",
+  claimId: "legacy-backend-1"
+}));
+assert.strictEqual(
+  legacyRejection.status,
+  "not_on_board",
+  "a sheet without the Attempts tab still decides claims"
+);
+const legacyAccepted = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  claimId: "legacy-backend-2"
+}));
+assert.strictEqual(legacyAccepted.status, "claimed");
+assert.strictEqual(lockDepth, 0, "the legacy path released the script lock");
+sheets.Attempts = ledgerRows;
+
+sheets.Claims = claimsBeforeLedger;
+sheets.Teams = teamsBeforeLedger;
 
 console.log("Apps Script grouped-tile and security tests passed");

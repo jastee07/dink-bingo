@@ -9,7 +9,7 @@ and the final `claimed` contribution.
 1. Create a new Google Sheet.
 2. **Extensions → Apps Script**, delete the placeholder, paste [`Code.gs`](Code.gs), save.
 3. Run `setupSheet` once from the editor (approve the permission prompt). This creates the
-   `Items`, `Teams`, `Claims`, `Audit`, `Config`, and `Leaderboard` tabs and generates a
+   `Items`, `Teams`, `Claims`, `Attempts`, `Audit`, `Config`, and `Leaderboard` tabs and generates a
    `token` and `admin_token`.
 4. Fill in `Items` using
    `tile_id`, `tile_name`, `item_id`, `item_name`, `points`, `required_count`, `notes`.
@@ -31,21 +31,25 @@ and the final `claimed` contribution.
    fail visibly. `required_count` is a whole number between 1 and the number of distinct tile
    options. Use `1` for 1-of-N and `3` for 3-of-5. Counts are based on distinct item ids, not
    stack quantity. Fill in `Teams` as `rsn` → `team`; team names are exact identifiers.
+   `Teams` is validated too: two rows for the same player (case and `_`/space are normalized,
+   and runs of separators collapse) are rejected naming both rows, as is a row with only one
+   of `rsn`/`team` filled in. Fully blank rows are ignored. The `rsn` spelling you enter is
+   what appears in `Claims`, the sidebar, and the `Leaderboard`.
 5. In **File → Settings**, set the spreadsheet **Time zone** to the organizer's intended event
-   timezone. Optionally set `discord_webhook`, `event_start`, `event_end`, and
-   `announce_from_backend` in `Config`. Enter start/end as real Google Sheets date/time values
-   (recommended), or as text in `yyyy-MM-dd HH:mm` format. Text values use the spreadsheet
-   timezone; ISO 8601 text must include `Z` or an explicit UTC offset. Start and end are
-   inclusive, and invalid or reversed boundaries reject requests instead of opening the event.
-   Leave `announce_from_backend` as `false` if your players run Dink — Dink's own announcement
-   includes a screenshot, the backend's does not.
+   timezone. Optionally set `event_start` and `event_end` in `Config`. Enter them as real
+   Google Sheets date/time values (recommended), or as text in `yyyy-MM-dd HH:mm` format. Text
+   values use the spreadsheet timezone; ISO 8601 text must include `Z` or an explicit UTC
+   offset. Start and end are inclusive, and invalid or reversed boundaries reject requests
+   instead of opening the event.
+
+   The backend does not post to Discord. Announcements come from each player's client through
+   Dink, because only the client can screenshot the drop.
 6. **Deploy → New deployment → Web app**, *Execute as* **Me**, *Who has access* **Anyone**.
    Copy the `/exec` URL.
 
 Keep the spreadsheet organizer-only. Give participants the `/exec` URL and player `token`,
-not access to the editable Sheet. The `admin_token` and optional `discord_webhook` remain in
-the organizer-owned `Config` tab and are never returned by the API. Hiding that tab is cosmetic,
-not access control.
+not access to the editable Sheet. The `admin_token` remains in the organizer-owned `Config`
+tab and is never returned by the API. Hiding that tab is cosmetic, not access control.
 
 `Leaderboard` is a formula-driven, read-only view of the authoritative tabs. Its team summary
 shows completed tiles, earned points, remaining tiles, and remaining points; the matrix below
@@ -87,10 +91,11 @@ Every mutating path holds `LockService.getScriptLock()`. A team/tile/item combin
 produce only one contribution row. Different accepted item ids can each advance a threshold
 tile until it completes; later contributions are duplicates.
 
-`Claims` is the only tab read while the lock is held. A claim reads `Items` and `Teams`
-before acquiring it, because a full sheet read is the slow part of the request and holding
-the lock across three of them lengthens the queue for every other claim in a burst. The
-checks that consume those reads still run inside the lock, in the same order as before.
+Only mutable state — `Claims` and `Attempts` — is read while the lock is held. A claim reads
+`Items` and `Teams` before acquiring it, because a full sheet read is the slow part of the
+request and holding the lock across all of them lengthens the queue for every other claim in
+a burst. The checks that consume those reads still run inside the lock, in the same order as
+before.
 
 The script lock only serializes runs of this script. It has never prevented an organizer from
 editing a tab in the browser mid-claim, so reading `Items` and `Teams` a moment earlier does
@@ -103,6 +108,23 @@ falsely reporting a duplicate. This ordering matters when a player is subbed out
 a claim the Sheet already committed replays, rather than becoming `not_on_team` and losing
 the announcement for a drop that was genuinely recorded. New claims from a subbed-out player
 are rejected as normal.
+
+Terminal *rejections* replay too, from the `Attempts` tab. Previously they were written only
+to `Audit`, which is never consulted, so a retry after a lost response was re-evaluated
+against whatever the state had become. A drop rejected just before `event_start` could be
+accepted by its own retry a moment after the event opened; a `Teams` or `Items` edit between
+attempts could flip `not_on_team` or `not_on_board` either way. `Attempts` records
+`event_closed`, `not_on_team`, `not_on_board`, and `duplicate` against the claim id so the
+answer is stable, and stores operational fields only — never a token.
+
+`Claims` still wins: an accepted contribution replays from its own row, because a row there
+means the contribution really happened. Only when nothing was accepted does the ledger apply.
+Reusing one claim id for a different RSN or item id returns `claim_id_conflict` rather than
+replaying somebody else's outcome. A replayed rejection writes no `Claims` row, adds no
+`Audit` row, and is never announced.
+
+A new drop of the same item gets a new claim id, so it is evaluated against current state as
+normal. The ledger only ever pins a retry of the *same* operation.
 
 When the original HTTP response is lost after the Sheet committed the claim, that replay is
 the first successful response the client sees, so the running client sends one Dink request.
@@ -184,18 +206,62 @@ For every existing sheet using the original one-item schema:
 1. Paste the new `Code.gs` and save.
 2. Run `upgradeGroupedTiles` once. It adds and backfills tile/threshold columns without
    deleting rows. Existing items use `required_count=1`; existing claims are marked complete.
-3. Run `scrubLegacySensitiveData` if the sheet received pre-security-hardening claims.
-4. Replace both `token` and `admin_token` if that security scrub was needed.
-5. Give participants only the current player token.
-6. Delete the retired `account_hash` column from `Claims` if you no longer want the empty
+3. Confirm the `Attempts` tab now exists; `upgradeGroupedTiles` creates it. Until it does,
+   the backend still decides claims correctly but terminal rejections are not replayed, so a
+   retry after a lost response can return a different answer.
+4. Run `scrubLegacySensitiveData` if the sheet received pre-security-hardening claims.
+5. Replace both `token` and `admin_token` if that security scrub was needed.
+6. Give participants only the current player token.
+7. Delete the retired `account_hash` column from `Claims` if you no longer want the empty
    legacy column.
-7. Deploy a new web-app version and update players to the threshold-capable plugin build
+8. Delete the `announce_from_backend` and `discord_webhook` rows from `Config` if they are
+   present. The backend no longer reads either one, and leaving a live webhook URL sitting in
+   the sheet is a credential you are not using. Rotate that webhook in Discord if it was ever
+   populated. Players who relied on backend announcements need Dink configured instead; see
+   [`SETUP.md`](../SETUP.md).
+9. Deploy a new web-app version and update players to the threshold-capable plugin build
    together.
    The `/exec` URL stays the same.
+
+`Attempts` grows by at most one row per rejected drop, so it stays far smaller than `Claims`
+for a normal event. Clear its data rows (keep the header) when you reuse the sheet for another
+event; leaving them only risks an old claim id colliding with a new one.
 
 Before raising `required_count` on a previously used tile, verify the existing contribution
 rows represent distinct item ids and reconcile any legacy conflicts. Always keep the same
 required count on every option row.
+
+### Repairing invalid Claims rows
+
+`Claims` is the correction surface, so it is also where a mistyped edit does damage. Tile
+completion is decided by counting contributions, which means a row crediting an unrelated item
+would otherwise complete a tile and award points that nobody earned.
+
+Every board and claim request now validates `Claims` against `Items` and fails with the
+offending row number rather than counting it:
+
+- `Claims row 7 credits tile_id "..." , which is not in Items` — the tile was renamed or
+  deleted in `Items` while its contributions remained.
+- `Claims row 7 credits item_id 4151 to tile_id "...", which does not list that item as an
+  option` — the item belongs to a different tile, or was removed from this tile's options.
+- `multiple Claims rows for team ... (Claims row 7)` — the same item is credited twice to one
+  team and tile.
+- `claim_id appears more than once: ... (Claims row 7)` — a copied row kept its claim id.
+
+Only ids are checked. `tile_name` and `item_name` are historical display text and are expected
+to differ once you rename something; old claims keep the name recorded when they were made.
+
+While any row is invalid the event is effectively frozen: board loads and new claims both
+fail. Repair it one of two ways:
+
+- Restore the missing tile or option in `Items`, if the row is legitimate and `Items` is what
+  changed. This is usually right when you renamed or reorganized tiles mid-event.
+- Remove the contribution with an admin `unclaim` (see the smoke tests above), which works
+  even while other rows fail validation and is the supported way to delete an orphan.
+
+The `Leaderboard` tab shows the same check in **Claims integrity** next to the team table, so
+you can spot the problem without reading an error response. Players see the reason in the
+sidebar, and the plugin keeps retrying, so a claim in flight during the repair still lands.
 
 ## Trust model
 
@@ -204,9 +270,38 @@ drive-by posts but not a determined participant. The `/exec` URL alone does not 
 board lookup or claim. The mitigations are visibility and reversibility:
 
 - `Audit` records operational claim/unclaim fields but allowlists out tokens and webhook URLs.
+- `Attempts` records terminal rejections against their claim id so retries are stable. It
+  holds the same class of operational fields and never a credential.
 - `Claims` records each distinct contribution's logical tile, actual item, normalized RSN,
   source, claim id, progress-after value, completion flag, and timestamp; it does not receive
   a RuneLite account hash.
 - `admin_token` is organizer-only and enables item-level or whole-tile unclaim.
-- `discord_webhook` is read only by Apps Script when backend announcements are enabled and is
-  never included in an API response or Audit row.
+- The backend holds no webhook and makes no outbound requests. Discord delivery belongs
+  entirely to each player's own Dink configuration.
+
+### Unauthenticated traffic
+
+The deployment must be published as *Who has access: **Anyone***, because players authenticate
+with the event token in the request body rather than with a Google account. Anyone who learns
+the `/exec` URL can therefore send requests without knowing any token.
+
+Requests that fail authentication — a wrong `token` on a board or claim request, or a wrong
+`admin_token` on an unclaim — are rejected **without writing to the spreadsheet**. They append
+no `Audit` row, take no script lock, and leave `Claims` untouched. Otherwise a stranger with
+only the URL could grow the sheet, exhaust the daily write quota, and contend for the lock
+with real claims during a drop burst.
+
+Those attempts are still counted out-of-band, in a script cache keyed by a coarse time bucket
+that expires on its own, and one generic line per bucket is written to the Apps Script
+execution log. The attempted credential, the caller, and the request body are never recorded.
+Check **Executions** in the Apps Script editor if players report `bad_token`; a burst there
+usually means the distributed event token no longer matches `Config`.
+
+Authenticated rejections — `bad_request`, `event_closed`, `not_on_team`, `not_on_board`, and
+`duplicate` — are still fully audited, because they come from someone who already holds the
+event token and are the rejections an organizer actually needs to investigate.
+
+This is not rate limiting. Apps Script offers no way to throttle a public web app, so the
+remaining exposure is request volume against Google's own quotas for the deployment. Rotating
+`token` does not help, since these requests never present a valid one. If a URL is being
+abused, create a new deployment (which issues a new `/exec` URL) and redistribute it.

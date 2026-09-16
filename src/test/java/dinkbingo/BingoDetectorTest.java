@@ -220,6 +220,92 @@ class BingoDetectorTest {
         verify(bingoClient, times(2)).submitClaim(any());
     }
 
+    /**
+     * A claim that never produced a usable response used to be entirely silent. The drop was
+     * not recorded anywhere, so a rare one could be lost without the player noticing in time
+     * to ask the organizer.
+     */
+    @Test
+    void reportsAClaimThatNeverResolved() {
+        List<String> unresolved = new ArrayList<>();
+        List<ClaimResponse> announced = new ArrayList<>();
+        detector.setClaimUnresolvedListener(unresolved::add);
+        detector.setClaimListener((response, source) -> announced.add(response));
+
+        CompletableFuture<ClaimResponse> failed = new CompletableFuture<>();
+        when(bingoClient.submitClaim(any())).thenReturn(failed);
+
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+        failed.complete(null); // retries exhausted, no usable response
+
+        assertEquals(Collections.singletonList("Abyssal whip"), unresolved,
+            "the player is told which drop was not claimed");
+        assertTrue(announced.isEmpty(),
+            "nothing reached the sheet, so there is nothing to announce");
+    }
+
+    @Test
+    void reportsAClaimThatFailedWithAnException() {
+        List<String> unresolved = new ArrayList<>();
+        detector.setClaimUnresolvedListener(unresolved::add);
+
+        CompletableFuture<ClaimResponse> failed = new CompletableFuture<>();
+        when(bingoClient.submitClaim(any())).thenReturn(failed);
+
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+        failed.completeExceptionally(new IllegalStateException("boom"));
+
+        assertEquals(Collections.singletonList("Abyssal whip"), unresolved);
+    }
+
+    /**
+     * A resolved outcome, including a rejection, already reaches the player through the claim
+     * listener. Reporting it as unresolved as well would double up the chat line.
+     */
+    @Test
+    void doesNotReportAResolvedRejectionAsUnresolved() {
+        List<String> unresolved = new ArrayList<>();
+        detector.setClaimUnresolvedListener(unresolved::add);
+        when(bingoClient.submitClaim(any())).thenReturn(
+            CompletableFuture.completedFuture(response(BingoResponses.NOT_ON_TEAM)));
+
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+
+        assertTrue(unresolved.isEmpty());
+    }
+
+    /**
+     * After the backend explicitly refuses a request, the board on screen is no longer one it
+     * will honour. Submitting against it only produces rejections the player cannot act on.
+     */
+    @Test
+    void suspendedDetectionSubmitsNothing() {
+        detector.setDetectionEnabled(false);
+
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+
+        verify(bingoClient, never()).submitClaim(any());
+    }
+
+    /** A board that loaded is proof the backend is answering this client again. */
+    @Test
+    void aFreshBoardResumesDetection() {
+        detector.setDetectionEnabled(false);
+        detector.setBoard(board(open(WHIP, "Abyssal whip")));
+
+        assertTrue(detector.isDetectionEnabled());
+        detector.onLoot(loot(WHIP, 1), "Abyssal demon");
+        verify(bingoClient, times(1)).submitClaim(any());
+    }
+
+    @Test
+    void resetResumesDetection() {
+        detector.setDetectionEnabled(false);
+        detector.reset();
+
+        assertTrue(detector.isDetectionEnabled());
+    }
+
     @Test
     void doesNotResubmitAfterBackendResolvesTheTile() {
         when(bingoClient.submitClaim(any()))

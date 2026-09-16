@@ -112,6 +112,7 @@ public class BingoPlugin extends Plugin {
         currentBoard = BingoBoard.EMPTY;
         boardLoaded = false;
         detector.setClaimListener(this::onClaimResolved);
+        detector.setClaimUnresolvedListener(this::onClaimUnresolved);
         overlayManager.add(verificationOverlay);
 
         BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/bingo_icon.png");
@@ -124,6 +125,7 @@ public class BingoPlugin extends Plugin {
         clientToolbar.addNavigation(navButton);
 
         panel.setRefreshHandler(this::refreshBoard);
+        panel.setTestHandler(this::sendDinkTest);
         if (bingoClient.isConfigured()) {
             panel.renderLoading();
         } else {
@@ -153,9 +155,16 @@ public class BingoPlugin extends Plugin {
         overlayManager.remove(verificationOverlay);
         panel.setRefreshHandler(() -> {
         });
+        panel.setTestHandler(() -> {
+        });
         detector.setClaimListener((response, source) -> {
         });
+        detector.setClaimUnresolvedListener(itemName -> {
+        });
         detector.reset();
+        // The panel outlives a plugin restart, so a timestamp left behind would describe a
+        // board from the previous run.
+        panel.resetFreshness();
     }
 
     // ------------------------------------------------------------------
@@ -191,6 +200,7 @@ public class BingoPlugin extends Plugin {
             currentBoard = BingoBoard.EMPTY;
             boardLoaded = false;
             detector.reset();
+            panel.resetFreshness();
             renderBoard(BingoBoard.EMPTY, false);
             return;
         }
@@ -211,6 +221,7 @@ public class BingoPlugin extends Plugin {
             inFlightRefresh = fetchRefresh;
         }
 
+        panel.markRefreshing();
         bingoClient.fetchBoard(rsn).whenComplete((result, error) ->
             finishRefresh(lifecycle, fetchRefresh, result, error));
     }
@@ -233,16 +244,37 @@ public class BingoPlugin extends Plugin {
                 BingoBoard board = result.getBoard();
                 currentBoard = board;
                 boardLoaded = true;
+                // Re-enables detection if an earlier refusal suspended it.
                 detector.setBoard(board);
+                // Only reached for a lifecycle-current refresh, so a stale completion from an
+                // older request can never move the timestamp forward.
+                panel.markRefreshSucceeded();
                 renderBoard(board, true);
-            } else if (!boardLoaded) {
+            } else {
                 // A reason only exists when the backend answered and refused. Everything
                 // else really is a failed round trip, which is what the generic message says.
                 String backendError = result == null ? null : result.getBackendError();
-                if (backendError == null) {
-                    panel.renderLoadError();
+                if (backendError != null) {
+                    // An explicit refusal -- a rotated token, a redeployed script, a broken
+                    // sheet -- means the backend will not honour this client as it stands.
+                    // Keeping the old board on screen and still submitting drops against it
+                    // hides the reason behind a board that looks current and produces claims
+                    // that cannot succeed. Stop detecting and say so; the rows stay as
+                    // reference, labelled.
+                    detector.setDetectionEnabled(false);
+                    if (boardLoaded) {
+                        panel.renderStale(currentBoard, true, config.boardView(),
+                            config.hideCompletedTiles(), backendError);
+                    } else {
+                        panel.renderLoadError(backendError);
+                    }
+                } else if (boardLoaded) {
+                    // The rows stay exactly as they are -- the board is probably still correct
+                    // and the next drop may well get through -- but they are no longer
+                    // confirmed current, and saying so is the whole point.
+                    panel.markRefreshFailed();
                 } else {
-                    panel.renderLoadError(backendError);
+                    panel.renderLoadError();
                 }
             }
         }
@@ -265,6 +297,7 @@ public class BingoPlugin extends Plugin {
             currentBoard = BingoBoard.EMPTY;
             boardLoaded = false;
             detector.reset();
+            panel.resetFreshness();
             if (bingoClient.isConfigured()) {
                 panel.renderLoading();
             }
@@ -283,6 +316,7 @@ public class BingoPlugin extends Plugin {
             currentBoard = BingoBoard.EMPTY;
             boardLoaded = false;
             detector.reset();
+            panel.resetFreshness();
             if (bingoClient.isConfigured()) {
                 panel.renderLoading();
             }
@@ -295,6 +329,37 @@ public class BingoPlugin extends Plugin {
 
     private void renderBoard(BingoBoard board, boolean configured) {
         panel.render(board, configured, config.boardView(), config.hideCompletedTiles());
+    }
+
+    // ------------------------------------------------------------------
+    // Dink test
+    // ------------------------------------------------------------------
+
+    /**
+     * Posts a test notification so a player can find a broken Dink setup before the event
+     * instead of on their first real drop.
+     * <p>
+     * Deliberately independent of the board: it never calls the backend, so it works with no
+     * team, a closed event, an unreachable backend, or no backend configured at all, and it
+     * cannot create a Claims or Audit row.
+     * <p>
+     * The chat line stops at "handed to Dink" on purpose. Nothing acknowledges the message,
+     * so claiming delivery here would rebuild the false confidence this feature exists to
+     * remove.
+     */
+    private void sendDinkTest() {
+        if (!active) {
+            return;
+        }
+        announcer.announceTest();
+        long lifecycle = lifecycleGeneration.get();
+        clientThread.invokeLater(() -> {
+            if (!isCurrent(lifecycle)) {
+                return;
+            }
+            sendChatMessage("Bingo: test notification handed to Dink. Dink does not confirm "
+                + "delivery \u2014 check Discord to be sure it arrived.");
+        });
     }
 
     // ------------------------------------------------------------------
@@ -393,8 +458,30 @@ public class BingoPlugin extends Plugin {
             case BingoResponses.NOT_ON_BOARD:
                 return "Bingo: " + item + " is not on the board.";
             default:
-                return "Bingo: claim failed (" + response.getStatus() + ").";
+                // Every backend failure arrives with status "error", so switching on status
+                // alone told the player nothing. The reason is in the error field, and its
+                // wording is shared with the sidebar so the two cannot drift apart.
+                return BingoErrors.describeClaimError(response.getError());
         }
+    }
+
+    /**
+     * No usable response ever arrived for a submitted claim.
+     * <p>
+     * The drop stays unresolved, so a later drop of the same item will try again, but the
+     * player was previously told nothing at all. Deliberately not announced: the sheet never
+     * recorded anything, so there is nothing to put in Discord.
+     */
+    private void onClaimUnresolved(String itemName) {
+        long lifecycle = lifecycleGeneration.get();
+        clientThread.invokeLater(() -> {
+            if (!isCurrent(lifecycle)) {
+                return;
+            }
+            if (config.chatMessageOnClaim()) {
+                sendChatMessage(BingoErrors.describeUnresolvedClaim(itemName));
+            }
+        });
     }
 
     private void sendChatMessage(String message) {
