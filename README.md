@@ -67,6 +67,10 @@ Existing sheets must follow the
    and a Discord webhook must be set (either Dink's *Primary Webhook URLs*, its *External
    Webhook Override*, or this plugin's own *Bingo Webhook Override*).
 3. In Bingo with Dink Notifications: paste the **Backend URL** and **Event Token**.
+4. Press **Test Dink** at the bottom of the sidebar and confirm the prompt. It posts a
+   notification clearly marked as a test, claims nothing, and changes no tile. Nothing
+   acknowledges a Dink message, so the plugin only reports that it handed the message over —
+   **seeing it in Discord is the verification**. If it never appears, step 2 is wrong.
 
 The sidebar shows when the board last loaded, so a board that has quietly stopped refreshing
 does not look identical to a current one. `Updated 14:32` means it is live, `Refreshing…` that
@@ -75,7 +79,20 @@ board. An explicit refusal from the backend also stops claim detection and says 
 
 That's it — the player's RSN is matched against the `Teams` tab, so nobody has to pick their
 own team in config. The sidebar keeps the team summary and Refresh button visible while long
-tile lists scroll underneath them.
+tile lists scroll underneath them, with the **Test Dink** button below them.
+
+### Testing the Dink handoff
+
+The plugin can load the board and claim tiles perfectly while Dink delivery is still broken —
+Dink not installed, *Enable External Plugin Notifications* off, no webhook set, or a **Bingo
+Webhook Override** that isn't a valid HTTPS url. None of that shows up until the first real
+drop.
+
+**Test Dink** takes the same path a real announcement does: the same `dink`/`notify` external
+message, the same webhook selection, and the same **Send Screenshot** setting, so a successful
+test also proves the capture path. It carries no item, tile or team, never calls the backend,
+and creates no `Claims` or `Audit` row, so it cannot be mistaken for — or used as — proof of a
+drop. It is rate limited to one test every 30 seconds.
 
 ## Configuration
 
@@ -96,6 +113,9 @@ tile lists scroll underneath them.
 | Completion Message | see config | Used when a contribution reaches the tile threshold |
 | Message tokens | — | `%USERNAME%`, `%ITEM%`, `%TILE%`, `%TEAM%`, `%PROGRESS%`, `%REQUIRED%`, `%REMAINING%`, `%SOURCE%` |
 | Game Chat Confirmation | on | Prints the claim result in game so you know it registered |
+
+The sidebar's **Test Dink** button is not a setting: it posts a test notification on demand,
+using **Send Screenshot** and **Bingo Webhook Override** exactly as a real claim would.
 
 ### Screenshot verification overlay
 

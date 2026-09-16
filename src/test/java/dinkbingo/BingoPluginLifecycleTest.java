@@ -6,10 +6,12 @@ import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.Player;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.chat.ChatMessageManager;
+import net.runelite.client.chat.QueuedMessage;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.overlay.OverlayManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
@@ -19,10 +21,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.never;
@@ -380,6 +384,71 @@ class BingoPluginLifecycleTest {
         plugin.onGameStateChanged(loggedOut);
 
         verify(panel).resetFreshness();
+    }
+
+    // ------------------------------------------------------------------
+    // Dink test action (#39)
+    // ------------------------------------------------------------------
+
+    /**
+     * The test exists to prove the Dink handoff, so it must not touch the sheet: no claim
+     * endpoint, no Claims row, no Audit row, and no board mutation.
+     */
+    @Test
+    void theDinkTestAnnouncesWithoutClaimingAnything() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Current Team"))));
+        when(config.chatMessageOnClaim()).thenReturn(true);
+
+        plugin.startUp();
+        runTestHandler();
+
+        verify(announcer).announceTest();
+        verify(announcer, never()).announce(any(), anyString());
+        verify(bingoClient, never()).submitClaim(any());
+        // One fetch from startup; the test must not trigger another round trip either.
+        verify(bingoClient, times(1)).fetchBoard("Jake");
+    }
+
+    /** Nothing acknowledges a Dink message, so the chat line must not promise delivery. */
+    @Test
+    void theDinkTestChatLineDoesNotClaimDelivery() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Current Team"))));
+
+        plugin.startUp();
+        runTestHandler();
+
+        ArgumentCaptor<QueuedMessage> captor = ArgumentCaptor.forClass(QueuedMessage.class);
+        verify(chatMessageManager).queue(captor.capture());
+        String message = captor.getValue().getRuneLiteFormattedMessage();
+        assertTrue(message.contains("handed to Dink"), message);
+        assertTrue(message.contains("does not confirm"), message);
+        assertTrue(message.contains("check Discord"), message);
+    }
+
+    /** A test queued after the plugin stopped has nothing left to announce. */
+    @Test
+    void theDinkTestIsIgnoredAfterShutdown() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Current Team"))));
+
+        plugin.startUp();
+        Runnable testHandler = captureTestHandler();
+        plugin.shutDown();
+        testHandler.run();
+
+        verify(announcer, never()).announceTest();
+    }
+
+    private void runTestHandler() {
+        captureTestHandler().run();
+    }
+
+    private Runnable captureTestHandler() {
+        ArgumentCaptor<Runnable> captor = ArgumentCaptor.forClass(Runnable.class);
+        verify(panel, atLeastOnce()).setTestHandler(captor.capture());
+        return captor.getAllValues().get(0);
     }
 
     private void inject(String name, Object value) throws Exception {

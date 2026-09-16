@@ -12,10 +12,13 @@ import java.awt.BorderLayout;
 import java.awt.Component;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -143,6 +146,96 @@ class BingoPanelTest {
 
         panel.renderLoading();
         assertEquals("", panel.freshnessText());
+    }
+
+    // ------------------------------------------------------------------
+    // Dink test action
+    // ------------------------------------------------------------------
+
+    /**
+     * A misconfigured Dink is invisible until the first real drop, so the test has to work
+     * with no eligible item and no live event -- it only hands a message to the plugin.
+     */
+    @Test
+    void theDinkTestIsAvailableWithoutABoardAndReportsWhatItActuallyDid() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        panel.setClock(Clock.fixed(Instant.parse("2026-09-15T14:32:00Z"), ZoneOffset.UTC));
+        AtomicInteger sent = new AtomicInteger();
+        panel.setTestHandler(sent::incrementAndGet);
+
+        // No board has ever loaded.
+        panel.renderLoading();
+        flush();
+
+        assertEquals("", panel.testStatusText());
+        assertTrue(invokeSendTest(panel));
+        assertEquals(1, sent.get());
+
+        String status = panel.testStatusText();
+        assertTrue(status.contains("Sent to Dink"), status);
+        // Dink acknowledges nothing, so the panel must not imply it arrived anywhere.
+        assertTrue(status.contains("does not confirm delivery"), status);
+        assertTrue(status.contains("check Discord"), status);
+        assertFalse(status.toLowerCase().contains("delivered"), status);
+    }
+
+    /** One stray double-click should not put two tests in an organizer's channel. */
+    @Test
+    void repeatedDinkTestsAreRateLimitedUntilTheCooldownElapses() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        MutableClock clock = new MutableClock(Instant.parse("2026-09-15T14:32:00Z"));
+        panel.setClock(clock);
+        AtomicInteger sent = new AtomicInteger();
+        panel.setTestHandler(sent::incrementAndGet);
+
+        assertTrue(invokeSendTest(panel));
+        assertFalse(invokeSendTest(panel), "a second press inside the cooldown must not post");
+        clock.advanceSeconds(29);
+        assertFalse(invokeSendTest(panel));
+        assertEquals(1, sent.get());
+
+        clock.advanceSeconds(1);
+        assertTrue(invokeSendTest(panel), "the cooldown must expire rather than lock the button");
+        assertEquals(2, sent.get());
+    }
+
+    private static boolean invokeSendTest(BingoPanel panel) throws Exception {
+        AtomicBoolean sent = new AtomicBoolean();
+        SwingUtilities.invokeAndWait(() -> sent.set(panel.sendTest()));
+        return sent.get();
+    }
+
+    /** Lets a test step over the cooldown without sleeping through it. */
+    private static final class MutableClock extends Clock {
+
+        private Instant now;
+
+        MutableClock(Instant now) {
+            this.now = now;
+        }
+
+        void advanceSeconds(long seconds) {
+            now = now.plusSeconds(seconds);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
     }
 
     private static List<BingoTile> tiles() {

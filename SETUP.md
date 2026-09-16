@@ -135,7 +135,10 @@ Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
 3. In **Bingo with Dink Notifications**, paste the **Backend URL** and **Event Token**.
 4. Confirm the **Loot Tracker** plugin is enabled (it is by default). See below — this matters
    more than it looks.
-5. Open the bingo icon in the sidebar. If you see your team name and the tile list, you're done.
+5. Optionally press **Test Dink** at the bottom of the sidebar and confirm the prompt. This is
+   the only way to check Dink delivery before a real drop — see *Verifying Dink before the
+   event* below.
+6. Open the bingo icon in the sidebar. If you see your team name and the tile list, you're done.
    Long tile lists scroll below the fixed team summary and Refresh button. "Not on a team"
    means your RSN isn't on the organizer's `Teams` tab. Set **Board View** to **Possible Items**
    to expand unfinished tiles into every item option your team can still contribute. Completed
@@ -144,6 +147,31 @@ Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
 
 Nothing else is needed. You don't pick your team, you don't enter item ids, and you don't have
 to remember to do anything when a drop lands.
+
+### Verifying Dink before the event
+
+A claim landing on the sheet proves nothing about Discord. The plugin hands the announcement
+to Dink and Dink never answers, so a board that loads and tiles that close can sit alongside a
+Dink that is not installed, has *Enable External Plugin Notifications* off, has no webhook, or
+a **Bingo Webhook Override** that is not a valid HTTPS url. The first real drop is a bad time
+to find out.
+
+The **Test Dink** button at the bottom of the sidebar posts a notification that is clearly
+labelled a test:
+
+- It uses the same `dink`/`notify` external message, the same webhook selection, and the same
+  **Send Screenshot** setting as a real announcement, so a test that arrives with an image
+  proves the capture path too.
+- It names no item, tile or team, so it cannot be passed off as a drop.
+- It never calls the backend, so it creates no `Claims` or `Audit` row and changes no tile. It
+  works with no team, a closed event, or no Backend URL at all.
+- It asks for confirmation first and allows one test every 30 seconds, because the message
+  lands in the event's Discord channel.
+
+The chat line stops at *handed to Dink* on purpose. **Seeing the message in Discord is the
+verification** — nothing else confirms delivery. Be logged in if you want to check the
+screenshot, and point the override at a throwaway channel if you would rather not post in the
+event's own.
 
 ---
 
@@ -218,7 +246,10 @@ Grimy guam, say), kill something that drops it, and watch the tile close.
 | Panel says "Backend error: ..." | The backend refused the fetch and named the reason: a missing sheet tab, an `Items` row it cannot read, or a bad `event_start`/`event_end`. The full reason is in the client log. |
 | Panel says "Check your connection" | The request never reached the backend. This one really is network or URL. |
 | Nothing happens on a drop, no chat line | The item id on the board doesn't match the real drop, or **Chat message on claim** is off. Check `Audit`. A backend that cannot be reached now says so in chat. |
-| Chat says progress/claimed, nothing in Discord | Dink's *Enable External Plugin Notifications* is off, or no webhook is set. |
+| Chat says progress/claimed, nothing in Discord | Dink's *Enable External Plugin Notifications* is off, or no webhook is set. Press **Test Dink** to confirm the handoff without waiting for another drop. |
+| **Test Dink** says it was sent, nothing in Discord | The message reached Dink or was dropped by it, and Dink acknowledges neither. Check Dink is installed and enabled, *Enable External Plugin Notifications* is on, a webhook is set, and any **Bingo Webhook Override** is a valid `https://` url — a non-HTTPS override is ignored. |
+| **Test Dink** arrives without a screenshot | **Send Screenshot** is off, Dink's *External Plugin Requests > Send Image* is set to `Never`, or you are not logged in. |
+| **Test Dink** button is greyed out | A test was sent in the last 30 seconds. |
 | Every claim fails silently | Deployment is not *Who has access: Anyone*. The client log names this explicitly. |
 | Contribution credited to the wrong team | Use item-level or whole-tile admin unclaim above, then fix the `Teams` tab. |
 | Chat says "your event token was rejected" | The plugin's **Event Token** does not match `token` on the `Config` tab. The drop was not recorded; ask the organizer to reclaim it once the token is fixed. |

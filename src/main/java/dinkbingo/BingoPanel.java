@@ -14,16 +14,19 @@ import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
 import javax.swing.JLabel;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -96,9 +99,24 @@ public class BingoPanel extends PluginPanel {
         ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
     );
     private final JButton refreshButton = new JButton("Refresh");
+    private final JButton testButton = new JButton("Test Dink");
+    private final JLabel testStatusLabel = new JLabel();
 
     private Runnable refreshHandler = () -> {
     };
+
+    private Runnable testHandler = () -> {
+    };
+
+    /**
+     * Long enough that a mistaken double press cannot put two messages in an organizer's
+     * channel, short enough to re-test straight after fixing a setting.
+     */
+    private static final Duration TEST_COOLDOWN = Duration.ofSeconds(30);
+
+    /** When the last test was handed to Dink; null until one has been. EDT-owned. */
+    @Nullable
+    private Instant lastTestAt;
 
     @Inject
     BingoPanel(ItemManager itemManager) {
@@ -132,8 +150,24 @@ public class BingoPanel extends PluginPanel {
         refreshButton.setFocusPainted(false);
         refreshButton.addActionListener(e -> refreshHandler.run());
 
+        testButton.setFocusPainted(false);
+        testButton.setFont(FontManager.getRunescapeSmallFont());
+        testButton.setToolTipText("Post a test notification to Dink. Claims nothing and "
+            + "changes no tile.");
+        testButton.addActionListener(e -> confirmAndSendTest());
+
+        testStatusLabel.setFont(FontManager.getRunescapeSmallFont());
+        testStatusLabel.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+        testStatusLabel.setVisible(false);
+
         header.add(titles, BorderLayout.CENTER);
         header.add(refreshButton, BorderLayout.EAST);
+
+        JPanel footer = new JPanel(new BorderLayout(0, 4));
+        footer.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        footer.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
+        footer.add(testButton, BorderLayout.NORTH);
+        footer.add(testStatusLabel, BorderLayout.CENTER);
 
         itemsPanel.setLayout(new GridBagLayout());
         itemsPanel.setBackground(ColorScheme.DARK_GRAY_COLOR);
@@ -144,10 +178,68 @@ public class BingoPanel extends PluginPanel {
 
         add(header, BorderLayout.NORTH);
         add(itemsScrollPane, BorderLayout.CENTER);
+        add(footer, BorderLayout.SOUTH);
     }
 
     public void setRefreshHandler(Runnable handler) {
         this.refreshHandler = handler;
+    }
+
+    public void setTestHandler(Runnable handler) {
+        this.testHandler = handler;
+    }
+
+    /**
+     * Asks before posting, because the message lands in whatever channel the event uses and
+     * nobody else can tell a stray test from a mistake.
+     */
+    private void confirmAndSendTest() {
+        int choice = JOptionPane.showConfirmDialog(
+            this,
+            "Post a test notification to Dink?\n\n"
+                + "It claims nothing and changes no tile, but it does appear in the Discord "
+                + "channel your webhook points at.",
+            "Test Dink notification",
+            JOptionPane.OK_CANCEL_OPTION,
+            JOptionPane.QUESTION_MESSAGE);
+        if (choice == JOptionPane.OK_OPTION) {
+            sendTest();
+        }
+    }
+
+    /**
+     * Hands a test to the plugin unless one was just sent. Returns whether it was sent.
+     * <p>
+     * The wording afterwards deliberately stops at "handed to Dink". Dink acknowledges
+     * nothing, so a panel that said "delivered" would be the same false confidence the test
+     * exists to remove -- the message appearing in Discord is the only confirmation.
+     */
+    boolean sendTest() {
+        Instant now = clock.instant();
+        if (lastTestAt != null && Duration.between(lastTestAt, now).compareTo(TEST_COOLDOWN) < 0) {
+            return false;
+        }
+        lastTestAt = now;
+        testButton.setEnabled(false);
+        // The width hint is what makes a long HTML label wrap instead of clipping in the
+        // fixed-width sidebar.
+        testStatusLabel.setText("<html><body style='width:100%'>Sent to Dink at "
+            + escape(timeFormat.format(now))
+            + ". Dink does not confirm delivery \u2014 check Discord.</body></html>");
+        testStatusLabel.setVisible(true);
+
+        Timer reEnable = new Timer((int) TEST_COOLDOWN.toMillis(),
+            e -> testButton.setEnabled(true));
+        reEnable.setRepeats(false);
+        reEnable.start();
+
+        testHandler.run();
+        return true;
+    }
+
+    /** The test line exactly as a player reads it; empty when no test has been sent. */
+    String testStatusText() {
+        return testStatusLabel.isVisible() ? testStatusLabel.getText() : "";
     }
 
     /** Safe to call from any thread. */

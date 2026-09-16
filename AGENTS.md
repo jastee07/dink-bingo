@@ -82,6 +82,11 @@ Unit tests must use mocks or `MockWebServer`; they must not call a deployed Apps
 real Discord webhook. Add regression coverage for changes to claim status handling, replay
 suppression, retry identity, URL types, and the Dink payload.
 
+The sidebar's **Test Dink** button posts a non-claiming `PluginMessage("dink", "notify", ...)`
+over the same url selection and screenshot flag as a real announcement. It is the
+non-destructive way to verify the Dink handoff: it must never call the backend, never carry an
+item, tile or team, and never report delivery, because Dink acknowledges nothing.
+
 Use a reversible test tile and team when manually verifying screenshot/webhook integration.
 Before making the test claim:
 

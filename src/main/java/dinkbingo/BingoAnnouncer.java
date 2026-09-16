@@ -43,6 +43,15 @@ public class BingoAnnouncer {
     private static final String WIKI_SEARCH_URL = "https://oldschool.runescape.wiki/w/Special:Search?search=";
 
     /**
+     * Unmistakably a test in Discord, and phrased so it cannot be mistaken for a drop or
+     * screenshotted as proof of one.
+     */
+    private static final String TEST_TITLE = "Bingo test notification (not a claim)";
+    private static final String TEST_TEXT =
+        "**TEST** \u2014 %USERNAME% is checking that bingo notifications reach this channel. "
+            + "No item was dropped and no tile was claimed.";
+
+    /**
      * Discord formatting characters that would be read as markup inside a link label rather
      * than as part of the item name. {@code ]} ends the label early and takes the link with
      * it; the rest only distort the rendered name.
@@ -132,23 +141,68 @@ public class BingoAnnouncer {
         metadata.put("complete", claim.isComplete());
         data.put("metadata", metadata);
 
-        // Dink rejects the whole request unless every element is an okhttp3.HttpUrl.
-        String webhook = config.bingoWebhook().trim();
-        if (!webhook.isEmpty()) {
-            List<HttpUrl> urls = new ArrayList<>();
-            for (String candidate : webhook.split("\n")) {
-                HttpUrl url = HttpUrl.parse(candidate.trim());
-                if (url != null && url.isHttps()) {
-                    urls.add(url);
-                }
-            }
-            if (!urls.isEmpty()) {
-                data.put("urls", urls);
-            }
-        }
+        applyWebhookOverride(data);
 
         log.info("Announcing bingo {} for {}", claim.isProgress() ? "progress" : "completion", itemName);
         eventBus.post(new PluginMessage(DINK_NAMESPACE, DINK_NOTIFY, data));
+    }
+
+    /**
+     * Posts a notification that claims nothing, so a player can prove the Dink handoff works
+     * before the event rather than on their first real drop.
+     * <p>
+     * Deliberately the same namespace, name, url selection and screenshot flag as a real
+     * announcement -- a test that took a different path would verify a path nothing else
+     * uses -- but it carries no item, no tile and no team, and the backend is never called.
+     * <p>
+     * Posting the message is not delivery. Dink acknowledges nothing, so the only proof is
+     * the message appearing in Discord; callers must say so rather than report success.
+     */
+    public void announceTest() {
+        Map<String, Object> data = new HashMap<>();
+        data.put("sourcePlugin", SOURCE_PLUGIN);
+        data.put("text", TEST_TEXT);
+        data.put("title", TEST_TITLE);
+        // Mirrors a real claim so the capture path is what gets verified, not a second one.
+        data.put("imageRequested", config.sendScreenshot());
+
+        List<Map<String, Object>> fields = new ArrayList<>(1);
+        fields.add(field("Test", "Configuration test \u2014 no tile was claimed and no board "
+            + "was changed", false));
+        data.put("fields", fields);
+
+        Map<String, Object> metadata = new HashMap<>(1);
+        metadata.put("test", true);
+        data.put("metadata", metadata);
+
+        applyWebhookOverride(data);
+
+        log.info("Sending Dink test notification");
+        eventBus.post(new PluginMessage(DINK_NAMESPACE, DINK_NOTIFY, data));
+    }
+
+    /**
+     * Routes to the configured bingo webhook when one is set, leaving Dink's own override or
+     * primary url in charge otherwise.
+     * <p>
+     * Dink rejects the whole request unless every element is an okhttp3.HttpUrl, and a
+     * non-HTTPS webhook is dropped rather than sent in the clear.
+     */
+    private void applyWebhookOverride(Map<String, Object> data) {
+        String webhook = config.bingoWebhook().trim();
+        if (webhook.isEmpty()) {
+            return;
+        }
+        List<HttpUrl> urls = new ArrayList<>();
+        for (String candidate : webhook.split("\n")) {
+            HttpUrl url = HttpUrl.parse(candidate.trim());
+            if (url != null && url.isHttps()) {
+                urls.add(url);
+            }
+        }
+        if (!urls.isEmpty()) {
+            data.put("urls", urls);
+        }
     }
 
     // ------------------------------------------------------------------

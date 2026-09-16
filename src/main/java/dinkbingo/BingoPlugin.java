@@ -125,6 +125,7 @@ public class BingoPlugin extends Plugin {
         clientToolbar.addNavigation(navButton);
 
         panel.setRefreshHandler(this::refreshBoard);
+        panel.setTestHandler(this::sendDinkTest);
         if (bingoClient.isConfigured()) {
             panel.renderLoading();
         } else {
@@ -153,6 +154,8 @@ public class BingoPlugin extends Plugin {
         navButton = null;
         overlayManager.remove(verificationOverlay);
         panel.setRefreshHandler(() -> {
+        });
+        panel.setTestHandler(() -> {
         });
         detector.setClaimListener((response, source) -> {
         });
@@ -326,6 +329,37 @@ public class BingoPlugin extends Plugin {
 
     private void renderBoard(BingoBoard board, boolean configured) {
         panel.render(board, configured, config.boardView(), config.hideCompletedTiles());
+    }
+
+    // ------------------------------------------------------------------
+    // Dink test
+    // ------------------------------------------------------------------
+
+    /**
+     * Posts a test notification so a player can find a broken Dink setup before the event
+     * instead of on their first real drop.
+     * <p>
+     * Deliberately independent of the board: it never calls the backend, so it works with no
+     * team, a closed event, an unreachable backend, or no backend configured at all, and it
+     * cannot create a Claims or Audit row.
+     * <p>
+     * The chat line stops at "handed to Dink" on purpose. Nothing acknowledges the message,
+     * so claiming delivery here would rebuild the false confidence this feature exists to
+     * remove.
+     */
+    private void sendDinkTest() {
+        if (!active) {
+            return;
+        }
+        announcer.announceTest();
+        long lifecycle = lifecycleGeneration.get();
+        clientThread.invokeLater(() -> {
+            if (!isCurrent(lifecycle)) {
+                return;
+            }
+            sendChatMessage("Bingo: test notification handed to Dink. Dink does not confirm "
+                + "delivery \u2014 check Discord to be sure it arrived.");
+        });
     }
 
     // ------------------------------------------------------------------
