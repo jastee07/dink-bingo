@@ -54,11 +54,17 @@ work that lands on the integration branch is still covered.
 
 ## Safe workflow
 
-Run from the repository root:
+There are two test suites and CI runs both, so run both from the repository root:
 
 ```bash
-./gradlew test
+./gradlew test          # the Java plugin
+node backend/Code.test.js   # the Apps Script backend
 ```
+
+The backend suite needs no network and no deployment: it loads `backend/Code.gs` into a Node
+`vm` context with the Apps Script services stubbed out. Nothing in it touches a real
+spreadsheet. A change to `Code.gs` is not verified by `./gradlew test`, which does not read
+that file at all.
 
 The Gradle wrapper stays on 8.x. Gradle 9 requires a JVM of 17 or later to run, and the
 Plugin Hub builds this plugin on Java 11, so a 9.x wrapper cannot build here no matter what
@@ -137,7 +143,13 @@ authorization and a reversible test tile/team.
 
 ## Verification expectations
 
-For ordinary Java changes, run `./gradlew test`. For integration changes, also side-load the
-client and claim a reversible test tile with a test webhook. A successful unit test proves
-the payload is posted to RuneLite's event bus; only the manual claim proves Dink accepted it,
-captured an image, and Discord received the multipart webhook.
+For ordinary Java changes, run `./gradlew test`. For anything in `backend/`, run
+`node backend/Code.test.js`; the two suites share no code and neither covers the other. For
+integration changes, also side-load the client and claim a reversible test tile with a test
+webhook. A successful unit test proves the payload is posted to RuneLite's event bus; only
+the manual claim proves Dink accepted it, captured an image, and Discord received the
+multipart webhook.
+
+The backend's leaderboard assertions run `setupLeaderboard` against a recording sheet and
+read the formulas back, so they hold however a formula is assembled. Assert on what an
+organizer would get, not on the source text of `Code.gs`.

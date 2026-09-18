@@ -10,7 +10,10 @@ and the final `claimed` contribution.
 2. **Extensions → Apps Script**, delete the placeholder, paste [`Code.gs`](Code.gs), save.
 3. Run `setupSheet` once from the editor (approve the permission prompt). This creates the
    `Items`, `Teams`, `Claims`, `Attempts`, `Audit`, `Config`, and `Leaderboard` tabs and generates a
-   `token` and `admin_token`.
+   `token` and `admin_token`. Every `tile_id` column is formatted as plain text, so a tile id
+   like `007` stays `007` instead of becoming `7` and no longer matching its `Items` row.
+   Re-running `setupSheet` later is safe: it never rewrites a header row and never touches a
+   tab that already has data.
 4. Fill in `Items` using
    `tile_id`, `tile_name`, `item_id`, `item_name`, `points`, `required_count`, `notes`.
    Each accepted item is a row. Alternatives share a tile id/name, points, and required count.
@@ -209,10 +212,14 @@ For every existing sheet using the original one-item schema:
 3. Confirm the `Attempts` tab now exists; `upgradeGroupedTiles` creates it. Until it does,
    the backend still decides claims correctly but terminal rejections are not replayed, so a
    retry after a lost response can return a different answer.
-4. Run `scrubLegacySensitiveData` if the sheet received pre-security-hardening claims.
-5. Replace both `token` and `admin_token` if that security scrub was needed.
-6. Give participants only the current player token.
-7. Delete the retired `account_hash` column from `Claims` if you no longer want the empty
+4. Run `setupSheet` once as well if the sheet's `Attempts` tab was created by an earlier
+   `setupSheet` rather than by `upgradeGroupedTiles`. Only that combination left the tab's
+   `tile_id` column unformatted, where a tile id with a leading zero is stored as a number.
+   Re-running is safe and changes nothing else.
+5. Run `scrubLegacySensitiveData` if the sheet received pre-security-hardening claims.
+6. Replace both `token` and `admin_token` if that security scrub was needed.
+7. Give participants only the current player token.
+8. Delete the retired `account_hash` column from `Claims` if you no longer want the empty
    legacy column.
 8. Delete the `announce_from_backend` and `discord_webhook` rows from `Config` if they are
    present. The backend no longer reads either one, and leaving a live webhook URL sitting in
