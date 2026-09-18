@@ -2,6 +2,7 @@ package dinkbingo;
 
 import com.google.inject.Provides;
 import dinkbingo.BingoResponses.ClaimResponse;
+import lombok.Value;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
@@ -46,6 +47,10 @@ import java.util.concurrent.atomic.AtomicLong;
     tags = {"bingo", "dink", "loot", "clan", "event", "collection", "discord"}
 )
 public class BingoPlugin extends Plugin {
+
+    /** A detached panel handler, for shutdown. */
+    private static final Runnable NOTHING = () -> {
+    };
 
     @Inject
     private Client client;
@@ -92,10 +97,21 @@ public class BingoPlugin extends Plugin {
     private final AtomicLong refreshGeneration = new AtomicLong();
     private final Object refreshStateLock = new Object();
     private volatile boolean active;
-    private boolean refreshInFlight;
+
+    /**
+     * The fetch currently in flight, or null when none is. Guarded by
+     * {@link #refreshStateLock}.
+     * <p>
+     * One field rather than a flag beside the two generations it is only valid for: a
+     * completion is accepted only when it names the request that is actually outstanding, and
+     * holding those together is what makes that impossible to get half right.
+     */
+    @Nullable
+    private RefreshKey inFlight;
+
+    /** Whether a refresh was asked for while one was already in flight. */
     private boolean refreshPending;
-    private long inFlightLifecycle;
-    private long inFlightRefresh;
+
     private volatile BingoBoard currentBoard = BingoBoard.EMPTY;
     private volatile boolean boardLoaded;
 
@@ -123,15 +139,10 @@ public class BingoPlugin extends Plugin {
         lifecycleGeneration.incrementAndGet();
         refreshGeneration.incrementAndGet();
         synchronized (refreshStateLock) {
-            refreshInFlight = false;
+            inFlight = null;
             refreshPending = false;
-            inFlightLifecycle = 0;
-            inFlightRefresh = 0;
         }
-        currentBoard = BingoBoard.EMPTY;
-        boardLoaded = false;
-        fetchState = SystemStatus.Fetch.NOT_CHECKED;
-        lastBackendError = null;
+        forgetBoard();
         detector.setClaimListener(this::onClaimResolved);
         detector.setClaimUnresolvedListener(this::onClaimUnresolved);
         overlayManager.add(verificationOverlay);
@@ -178,12 +189,11 @@ public class BingoPlugin extends Plugin {
         }
         navButton = null;
         overlayManager.remove(verificationOverlay);
-        panel.setRefreshHandler(() -> {
-        });
-        panel.setTestHandler(() -> {
-        });
-        panel.setSystemCheckHandler(() -> {
-        });
+        // The panel and the detector are singletons that outlive this run, so every callback
+        // into the plugin is detached before it can fire against a shut-down instance.
+        panel.setRefreshHandler(NOTHING);
+        panel.setTestHandler(NOTHING);
+        panel.setSystemCheckHandler(NOTHING);
         detector.setClaimListener((response, source) -> {
         });
         detector.setClaimUnresolvedListener(itemName -> {
@@ -226,12 +236,7 @@ public class BingoPlugin extends Plugin {
             return;
         }
         if (!bingoClient.isConfigured()) {
-            currentBoard = BingoBoard.EMPTY;
-            boardLoaded = false;
-            fetchState = SystemStatus.Fetch.NOT_CHECKED;
-            lastBackendError = null;
-            detector.reset();
-            panel.resetFreshness();
+            resetBoardState();
             renderBoard(BingoBoard.EMPTY, false);
             publishSystemStatus();
             return;
@@ -241,39 +246,36 @@ public class BingoPlugin extends Plugin {
         }
 
         String rsn = client.getLocalPlayer().getName();
-        long fetchRefresh;
+        RefreshKey key;
         synchronized (refreshStateLock) {
-            if (refreshInFlight) {
+            if (inFlight != null) {
                 refreshPending = true;
                 return;
             }
-            refreshInFlight = true;
-            fetchRefresh = refreshGeneration.get();
-            inFlightLifecycle = lifecycle;
-            inFlightRefresh = fetchRefresh;
+            key = new RefreshKey(lifecycle, refreshGeneration.get());
+            inFlight = key;
         }
 
         fetchState = SystemStatus.Fetch.CHECKING;
         panel.markRefreshing();
         publishSystemStatus();
         bingoClient.fetchBoard(rsn).whenComplete((result, error) ->
-            finishRefresh(lifecycle, fetchRefresh, result, error));
+            finishRefresh(key, result, error));
     }
 
-    private void finishRefresh(long lifecycle, long fetchRefresh, BoardResult result, Throwable error) {
+    private void finishRefresh(RefreshKey key, BoardResult result, Throwable error) {
         boolean rerun;
         synchronized (refreshStateLock) {
-            if (!refreshInFlight
-                || inFlightLifecycle != lifecycle
-                || inFlightRefresh != fetchRefresh) {
+            if (!key.equals(inFlight)) {
                 return;
             }
-            refreshInFlight = false;
+            inFlight = null;
             rerun = refreshPending;
             refreshPending = false;
         }
 
-        if (isCurrent(lifecycle) && fetchRefresh == refreshGeneration.get()) {
+        long lifecycle = key.getLifecycle();
+        if (isCurrent(lifecycle) && key.getRefresh() == refreshGeneration.get()) {
             if (error == null && result != null && result.isSuccess()) {
                 BingoBoard board = result.getBoard();
                 currentBoard = board;
@@ -329,6 +331,24 @@ public class BingoPlugin extends Plugin {
         return active && lifecycle == lifecycleGeneration.get();
     }
 
+    /**
+     * Run something on the client thread, but only if this plugin run is still the current one.
+     * <p>
+     * The game state and the local player can only be read on that thread, and everything
+     * queued onto it here is the tail of an asynchronous operation -- a finished claim, a
+     * readiness snapshot, a chat line -- that can land after a shutdown or a restart. The
+     * lifecycle is captured now and checked then, so late work is dropped rather than talking
+     * to a panel and a detector that belong to a different run.
+     */
+    private void onClientThread(Runnable work) {
+        long lifecycle = lifecycleGeneration.get();
+        clientThread.invokeLater(() -> {
+            if (isCurrent(lifecycle)) {
+                work.run();
+            }
+        });
+    }
+
     @Subscribe
     public void onGameStateChanged(GameStateChanged event) {
         if (event.getGameState() == GameState.LOGGED_IN) {
@@ -336,15 +356,8 @@ public class BingoPlugin extends Plugin {
             refreshBoard();
         } else if (event.getGameState() == GameState.LOGIN_SCREEN) {
             refreshGeneration.incrementAndGet();
-            currentBoard = BingoBoard.EMPTY;
-            boardLoaded = false;
-            fetchState = SystemStatus.Fetch.NOT_CHECKED;
-            lastBackendError = null;
-            detector.reset();
-            panel.resetFreshness();
-            if (bingoClient.isConfigured()) {
-                panel.renderLoading();
-            }
+            resetBoardState();
+            renderLoadingIfConfigured();
             publishSystemStatus();
         }
     }
@@ -358,20 +371,11 @@ public class BingoPlugin extends Plugin {
             scheduleRefresh();
         }
         if ("backendUrl".equals(event.getKey()) || "eventToken".equals(event.getKey())) {
-            currentBoard = BingoBoard.EMPTY;
-            boardLoaded = false;
-            // Nothing has been proved about the new backend or token yet, and carrying the
-            // old verdict forward would report the previous event's setup as this one's.
-            fetchState = SystemStatus.Fetch.NOT_CHECKED;
-            lastBackendError = null;
-            detector.reset();
-            panel.resetFreshness();
+            resetBoardState();
             // A different backend or token is a different event. A search left over from the
             // old board would present the new one as empty.
             panel.clearFilters();
-            if (bingoClient.isConfigured()) {
-                panel.renderLoading();
-            }
+            renderLoadingIfConfigured();
             refreshBoard();
         } else if (("boardView".equals(event.getKey())
             || "hideCompletedTiles".equals(event.getKey())) && boardLoaded) {
@@ -381,6 +385,54 @@ public class BingoPlugin extends Plugin {
 
     private void renderBoard(BingoBoard board, boolean configured) {
         panel.render(board, configured, config.boardView(), config.hideCompletedTiles());
+    }
+
+    /**
+     * Forget the board and everything concluded from it.
+     * <p>
+     * Used whenever the thing the board described has changed underneath it: a logout, a new
+     * backend or token, a plugin that is no longer configured. Nothing has been proved about
+     * the new situation yet, so carrying the old verdict forward would report the previous
+     * event's setup as this one's, and leaving the snapshot in place would let a drop be
+     * claimed against a board that no longer applies.
+     */
+    private void resetBoardState() {
+        forgetBoard();
+        detector.reset();
+        panel.resetFreshness();
+    }
+
+    /** The plugin's own view of the board, without touching the detector or the panel. */
+    private void forgetBoard() {
+        currentBoard = BingoBoard.EMPTY;
+        boardLoaded = false;
+        fetchState = SystemStatus.Fetch.NOT_CHECKED;
+        lastBackendError = null;
+    }
+
+    /**
+     * Say a board is on its way, but only if one actually is. With no backend configured the
+     * panel keeps saying so, which is the thing the player has to fix.
+     */
+    private void renderLoadingIfConfigured() {
+        if (bingoClient.isConfigured()) {
+            panel.renderLoading();
+        }
+    }
+
+    /**
+     * Names one board fetch: the plugin run it belongs to, and which refresh of that run it is.
+     * <p>
+     * A completion is applied only when this still matches the outstanding request, so a
+     * response that arrives after a restart, a logout, or a newer refresh is dropped rather
+     * than overwriting current state with an older board.
+     */
+    @Value
+    private static class RefreshKey {
+
+        long lifecycle;
+
+        long refresh;
     }
 
     // ------------------------------------------------------------------
@@ -418,13 +470,7 @@ public class BingoPlugin extends Plugin {
      * slow part of a check is the board fetch, which is somebody else's thread entirely.
      */
     private void publishSystemStatus() {
-        long lifecycle = lifecycleGeneration.get();
-        clientThread.invokeLater(() -> {
-            if (!isCurrent(lifecycle)) {
-                return;
-            }
-            panel.renderSystemCheck(buildSystemStatus());
-        });
+        onClientThread(() -> panel.renderSystemCheck(buildSystemStatus()));
     }
 
     private SystemStatus buildSystemStatus() {
@@ -503,14 +549,9 @@ public class BingoPlugin extends Plugin {
             return;
         }
         announcer.announceTest();
-        long lifecycle = lifecycleGeneration.get();
-        clientThread.invokeLater(() -> {
-            if (!isCurrent(lifecycle)) {
-                return;
-            }
-            sendChatMessage("Bingo: test notification handed to Dink. Dink does not confirm "
-                + "delivery \u2014 check Discord to be sure it arrived.");
-        });
+        onClientThread(() -> sendChatMessage(
+            "Bingo: test notification handed to Dink. Dink does not confirm delivery "
+                + "\u2014 check Discord to be sure it arrived."));
     }
 
     // ------------------------------------------------------------------
@@ -565,14 +606,10 @@ public class BingoPlugin extends Plugin {
         if (response == null) {
             return;
         }
-        long lifecycle = lifecycleGeneration.get();
-        clientThread.invokeLater(() -> handleClaimResolved(lifecycle, response, source));
+        onClientThread(() -> handleClaimResolved(response, source));
     }
 
-    private void handleClaimResolved(long lifecycle, ClaimResponse response, String source) {
-        if (!isCurrent(lifecycle)) {
-            return;
-        }
+    private void handleClaimResolved(ClaimResponse response, String source) {
         announcer.announce(response, source);
 
         if (config.chatMessageOnClaim()) {
@@ -624,11 +661,7 @@ public class BingoPlugin extends Plugin {
      * recorded anything, so there is nothing to put in Discord.
      */
     private void onClaimUnresolved(String itemName) {
-        long lifecycle = lifecycleGeneration.get();
-        clientThread.invokeLater(() -> {
-            if (!isCurrent(lifecycle)) {
-                return;
-            }
+        onClientThread(() -> {
             if (config.chatMessageOnClaim()) {
                 sendChatMessage(BingoErrors.describeUnresolvedClaim(itemName));
             }
