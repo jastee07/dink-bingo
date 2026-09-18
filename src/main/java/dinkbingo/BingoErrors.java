@@ -52,19 +52,31 @@ final class BingoErrors {
             "that claim id was already used for a different drop, so nothing was claimed. "
                 + "Tell the organizer if this keeps happening."),
 
-        BAD_JSON("bad_json", REQUEST_BOARD, REQUEST_CLAIM),
-        BAD_REQUEST("bad_request", REQUEST_BOARD, REQUEST_CLAIM),
-        POST_REQUIRED("post_required", REQUEST_BOARD, REQUEST_CLAIM),
-        UNKNOWN_ACTION("unknown_action", REQUEST_BOARD, REQUEST_CLAIM);
+        /**
+         * The four reasons that mean the deployment did not understand the request at all.
+         * Marked on the constant rather than listed again in a predicate, so a new one cannot
+         * be given wording without also being recognized by
+         * {@link BingoErrors#isUnsupportedRequest}.
+         */
+        BAD_JSON("bad_json", REQUEST_BOARD, REQUEST_CLAIM, true),
+        BAD_REQUEST("bad_request", REQUEST_BOARD, REQUEST_CLAIM, true),
+        POST_REQUIRED("post_required", REQUEST_BOARD, REQUEST_CLAIM, true),
+        UNKNOWN_ACTION("unknown_action", REQUEST_BOARD, REQUEST_CLAIM, true);
 
         private final String code;
         private final String board;
         private final String claim;
+        private final boolean unsupportedRequest;
 
         Reason(String code, String board, String claim) {
+            this(code, board, claim, false);
+        }
+
+        Reason(String code, String board, String claim, boolean unsupportedRequest) {
             this.code = code;
             this.board = board;
             this.claim = claim;
+            this.unsupportedRequest = unsupportedRequest;
         }
     }
 
@@ -110,14 +122,11 @@ final class BingoErrors {
     /**
      * Whether a backend reason means the deployment did not understand the request at all,
      * which is what an Apps Script left on an old copy of {@code Code.gs} looks like from
-     * here. Kept beside the wording so a new reason cannot be added to one and not the other.
+     * here.
      */
     static boolean isUnsupportedRequest(@Nullable String backendError) {
         Reason reason = lookup(normalize(backendError));
-        return reason == Reason.BAD_JSON
-            || reason == Reason.BAD_REQUEST
-            || reason == Reason.POST_REQUIRED
-            || reason == Reason.UNKNOWN_ACTION;
+        return reason != null && reason.unsupportedRequest;
     }
 
     /** Whether a backend reason means the event token itself was refused. */

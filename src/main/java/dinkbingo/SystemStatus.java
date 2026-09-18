@@ -1,5 +1,6 @@
 package dinkbingo;
 
+import lombok.Builder;
 import lombok.Getter;
 import org.jetbrains.annotations.Nullable;
 
@@ -16,8 +17,14 @@ import org.jetbrains.annotations.Nullable;
  * Nothing secret belongs here. The event token is represented by {@link #tokenSet} and the
  * backend URL by a {@link BackendUrlState}, so no check can put either on screen even by
  * accident.
+ * <p>
+ * The builder defaults describe a plugin that has done nothing yet, so a partially filled
+ * status reports "not checked" rather than inventing a passing row.
  */
 @Getter
+// Named Builder rather than Lombok's default SystemStatusBuilder: the nested name reads
+// better at the one call site that fills it in, and in the tests that vary one field at a time.
+@Builder(builderClassName = "Builder")
 public final class SystemStatus {
 
     /** What the last board fetch did. */
@@ -44,15 +51,19 @@ public final class SystemStatus {
         RUNNING
     }
 
-    private final BackendUrlState backendUrl;
+    @Builder.Default
+    private final BackendUrlState backendUrl = BackendUrlState.UNSET;
+
     private final boolean tokenSet;
+
     private final boolean loggedIn;
 
     /** The local player's display name, or null when not logged in. */
     @Nullable
     private final String rsn;
 
-    private final Fetch fetch;
+    @Builder.Default
+    private final Fetch fetch = Fetch.NOT_CHECKED;
 
     /** The backend's raw {@code error} value for a {@link Fetch#REJECTED} fetch. */
     @Nullable
@@ -62,102 +73,12 @@ public final class SystemStatus {
     @Nullable
     private final BingoBoard board;
 
-    private final boolean detectionEnabled;
-    private final Presence dink;
-    private final Presence lootTracker;
+    @Builder.Default
+    private final boolean detectionEnabled = true;
 
-    private SystemStatus(Builder builder) {
-        this.backendUrl = builder.backendUrl;
-        this.tokenSet = builder.tokenSet;
-        this.loggedIn = builder.loggedIn;
-        this.rsn = builder.rsn;
-        this.fetch = builder.fetch;
-        this.backendError = builder.backendError;
-        this.board = builder.board;
-        this.detectionEnabled = builder.detectionEnabled;
-        this.dink = builder.dink;
-        this.lootTracker = builder.lootTracker;
-    }
+    @Builder.Default
+    private final Presence dink = Presence.UNKNOWN;
 
-    public static Builder builder() {
-        return new Builder();
-    }
-
-    /**
-     * Defaults describe a plugin that has done nothing yet, so a partially filled status
-     * reports "not checked" rather than inventing a passing row.
-     */
-    public static final class Builder {
-
-        private BackendUrlState backendUrl = BackendUrlState.UNSET;
-        private boolean tokenSet;
-        private boolean loggedIn;
-        @Nullable
-        private String rsn;
-        private Fetch fetch = Fetch.NOT_CHECKED;
-        @Nullable
-        private String backendError;
-        @Nullable
-        private BingoBoard board;
-        private boolean detectionEnabled = true;
-        private Presence dink = Presence.UNKNOWN;
-        private Presence lootTracker = Presence.UNKNOWN;
-
-        private Builder() {
-        }
-
-        public Builder backendUrl(BackendUrlState backendUrl) {
-            this.backendUrl = backendUrl;
-            return this;
-        }
-
-        public Builder tokenSet(boolean tokenSet) {
-            this.tokenSet = tokenSet;
-            return this;
-        }
-
-        public Builder loggedIn(boolean loggedIn) {
-            this.loggedIn = loggedIn;
-            return this;
-        }
-
-        public Builder rsn(@Nullable String rsn) {
-            this.rsn = rsn;
-            return this;
-        }
-
-        public Builder fetch(Fetch fetch) {
-            this.fetch = fetch;
-            return this;
-        }
-
-        public Builder backendError(@Nullable String backendError) {
-            this.backendError = backendError;
-            return this;
-        }
-
-        public Builder board(@Nullable BingoBoard board) {
-            this.board = board;
-            return this;
-        }
-
-        public Builder detectionEnabled(boolean detectionEnabled) {
-            this.detectionEnabled = detectionEnabled;
-            return this;
-        }
-
-        public Builder dink(Presence dink) {
-            this.dink = dink;
-            return this;
-        }
-
-        public Builder lootTracker(Presence lootTracker) {
-            this.lootTracker = lootTracker;
-            return this;
-        }
-
-        public SystemStatus build() {
-            return new SystemStatus(this);
-        }
-    }
+    @Builder.Default
+    private final Presence lootTracker = Presence.UNKNOWN;
 }

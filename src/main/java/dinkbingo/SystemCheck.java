@@ -1,6 +1,7 @@
 package dinkbingo;
 
 import lombok.Getter;
+import lombok.Value;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
@@ -31,40 +32,43 @@ public final class SystemCheck {
      * {@link #NOT_CHECKED} is deliberately distinct from {@link #READY}: a check that could
      * not run yet must never read as one that passed, which is the whole failure mode this
      * view exists to remove.
+     * <p>
+     * Declared least to most serious, so {@link #getState()} is a max over the rows and needs
+     * no separate severity table to fall out of step with the constants.
      */
     public enum State {
+        READY,
         NOT_CHECKED,
         CHECKING,
-        READY,
         /** Usable, but something will not work the way the player expects. */
         WARNING,
         FAILED
     }
 
-    /** One line of the report: what was checked, how it came out, and what to do about it. */
-    @Getter
+    /**
+     * One line of the report: what was checked, how it came out, and what to do about it.
+     * <p>
+     * Built through the per-state factories below rather than the constructor, so a row's
+     * state and its wording are chosen together at the call site.
+     */
+    @Value
     public static final class Row {
 
-        private final String name;
-        private final State state;
-        private final String detail;
+        String name;
+
+        State state;
+
+        String detail;
 
         /** What the player should do, or null when there is nothing to do. */
         @Nullable
-        private final String action;
-
-        private Row(String name, State state, String detail, @Nullable String action) {
-            this.name = name;
-            this.state = state;
-            this.detail = detail;
-            this.action = action;
-        }
+        String action;
 
         static Row ready(String name, String detail) {
-            return new Row(name, State.READY, detail, null);
+            return ready(name, detail, null);
         }
 
-        static Row ready(String name, String detail, String action) {
+        static Row ready(String name, String detail, @Nullable String action) {
             return new Row(name, State.READY, detail, action);
         }
 
@@ -73,10 +77,10 @@ public final class SystemCheck {
         }
 
         static Row notChecked(String name, String detail) {
-            return new Row(name, State.NOT_CHECKED, detail, null);
+            return notChecked(name, detail, null);
         }
 
-        static Row notChecked(String name, String detail, String action) {
+        static Row notChecked(String name, String detail, @Nullable String action) {
             return new Row(name, State.NOT_CHECKED, detail, action);
         }
 
@@ -119,7 +123,7 @@ public final class SystemCheck {
     public State getState() {
         State worst = State.READY;
         for (Row row : rows) {
-            if (severity(row.getState()) > severity(worst)) {
+            if (row.getState().compareTo(worst) > 0) {
                 worst = row.getState();
             }
         }
@@ -133,57 +137,29 @@ public final class SystemCheck {
      * they just fixed was the only one.
      */
     public String summary() {
-        int failed = 0;
-        int warnings = 0;
-        boolean checking = false;
-        boolean unchecked = false;
+        switch (getState()) {
+            case FAILED:
+                return count(State.FAILED, "problem");
+            case WARNING:
+                return count(State.WARNING, "warning");
+            case CHECKING:
+                return "checking…";
+            case NOT_CHECKED:
+                return "not checked";
+            default:
+                return "ready";
+        }
+    }
+
+    /** How many rows are in this state, pluralized: "1 problem", "2 problems". */
+    private String count(State state, String noun) {
+        int n = 0;
         for (Row row : rows) {
-            switch (row.getState()) {
-                case FAILED:
-                    failed++;
-                    break;
-                case WARNING:
-                    warnings++;
-                    break;
-                case CHECKING:
-                    checking = true;
-                    break;
-                case NOT_CHECKED:
-                    unchecked = true;
-                    break;
-                default:
-                    break;
+            if (row.getState() == state) {
+                n++;
             }
         }
-        if (failed > 0) {
-            return count(failed, "problem");
-        }
-        if (warnings > 0) {
-            return count(warnings, "warning");
-        }
-        if (checking) {
-            return "checking…";
-        }
-        return unchecked ? "not checked" : "ready";
-    }
-
-    private static String count(int n, String noun) {
         return n + " " + noun + (n == 1 ? "" : "s");
-    }
-
-    private static int severity(State state) {
-        switch (state) {
-            case FAILED:
-                return 4;
-            case WARNING:
-                return 3;
-            case CHECKING:
-                return 2;
-            case NOT_CHECKED:
-                return 1;
-            default:
-                return 0;
-        }
     }
 
     // ------------------------------------------------------------------
