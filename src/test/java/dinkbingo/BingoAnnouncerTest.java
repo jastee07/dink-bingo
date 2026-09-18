@@ -18,6 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -195,6 +196,111 @@ class BingoAnnouncerTest {
     void toleratesANullResponse() {
         announcer.announce(null, "Abyssal demon");
         verify(eventBus, never()).post(any());
+    }
+
+    // ------------------------------------------------------------------
+    // Dink test notification
+    // ------------------------------------------------------------------
+
+    /**
+     * The whole point of the test action is that it exercises the real handoff, so it has to
+     * be the same namespace and message name Dink listens on.
+     */
+    @Test
+    void dinkTestPostsOnTheSameExternalMessageAsARealAnnouncement() {
+        announcer.announceTest();
+
+        PluginMessage message = capture();
+        assertEquals("dink", message.getNamespace());
+        assertEquals("notify", message.getName());
+        assertEquals("Bingo with Dink Notifications", message.getData().get("sourcePlugin"));
+    }
+
+    /** A test that read like a drop would be usable as fake proof of one. */
+    @Test
+    void dinkTestIsUnmistakablyMarkedAsATest() {
+        announcer.announceTest();
+
+        Map<String, Object> data = capture().getData();
+        String title = String.valueOf(data.get("title"));
+        String text = String.valueOf(data.get("text"));
+        assertTrue(title.toLowerCase().contains("test"), title);
+        assertTrue(title.toLowerCase().contains("not a claim"), title);
+        assertTrue(text.contains("TEST"), text);
+        assertTrue(text.contains("no tile was claimed"), text);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> fields = (List<Map<String, Object>>) data.get("fields");
+        assertTrue(fields.stream().anyMatch(field -> "Test".equals(field.get("name"))));
+    }
+
+    /** No item, no tile, no team: nothing that could be read as a drop that happened. */
+    @Test
+    void dinkTestCarriesNoClaimDetail() {
+        announcer.announceTest();
+
+        Map<String, Object> data = capture().getData();
+        assertFalse(data.containsKey("thumbnail"));
+        assertFalse(data.containsKey("replacements"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> metadata = (Map<String, Object>) data.get("metadata");
+        assertEquals(true, metadata.get("test"));
+        assertFalse(metadata.containsKey("itemId"));
+        assertFalse(metadata.containsKey("tileId"));
+        assertFalse(metadata.containsKey("team"));
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> fields = (List<Map<String, Object>>) data.get("fields");
+        assertFalse(fields.stream().anyMatch(field -> "Team".equals(field.get("name"))));
+        assertFalse(fields.stream().anyMatch(field -> "Progress".equals(field.get("name"))));
+    }
+
+    /** Verifying the screenshot path is most of why an organizer asks for a test. */
+    @Test
+    void dinkTestRequestsAnImageExactlyWhenARealAnnouncementWould() {
+        announcer.announceTest();
+        assertEquals(true, capture().getData().get("imageRequested"));
+
+        when(config.sendScreenshot()).thenReturn(false);
+        announcer = new BingoAnnouncer(eventBus, config);
+        announcer.announceTest();
+
+        ArgumentCaptor<PluginMessage> captor = ArgumentCaptor.forClass(PluginMessage.class);
+        verify(eventBus, times(2)).post(captor.capture());
+        assertEquals(false, captor.getAllValues().get(1).getData().get("imageRequested"));
+    }
+
+    /**
+     * A test routed anywhere other than the configured override would prove the wrong
+     * channel works.
+     */
+    @Test
+    void dinkTestUsesTheSameUrlSelectionAsARealAnnouncement() {
+        when(config.bingoWebhook()).thenReturn("https://discord.com/api/webhooks/a/b");
+
+        announcer.announceTest();
+
+        Object urls = capture().getData().get("urls");
+        assertTrue(urls instanceof List);
+        assertEquals(1, ((List<?>) urls).size());
+        for (Object url : (List<?>) urls) {
+            assertTrue(url instanceof HttpUrl, "Dink rejects url entries that are not HttpUrl");
+            assertEquals("https://discord.com/api/webhooks/a/b", url.toString());
+        }
+    }
+
+    @Test
+    void dinkTestOmitsUrlsWhenNoOverrideIsSet() {
+        announcer.announceTest();
+        assertFalse(capture().getData().containsKey("urls"));
+    }
+
+    @Test
+    void dinkTestOmitsAnInsecureWebhookOverride() {
+        when(config.bingoWebhook()).thenReturn("http://example.com/webhook");
+        announcer.announceTest();
+        assertFalse(capture().getData().containsKey("urls"));
     }
 
     // ------------------------------------------------------------------
