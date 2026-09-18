@@ -623,23 +623,14 @@ public class BingoPanel extends PluginPanel {
     }
 
     private void populateCheckRows(@Nullable SystemCheck check) {
-        GridBagConstraints c = new GridBagConstraints();
-        c.fill = GridBagConstraints.HORIZONTAL;
-        c.gridx = 0;
-        c.gridy = 0;
-        c.weightx = 1;
-
-        checkPanel.add(runChecksButton, c);
-        c.gridy++;
-        checkPanel.add(buildCheckNote(), c);
-        c.gridy++;
+        RowSink rows = new RowSink(checkPanel);
+        rows.add(runChecksButton);
+        rows.add(buildCheckNote());
         if (check == null) {
-            checkPanel.add(buildEmptyRow("Nothing has been checked yet. Press Run checks "
-                + "again."), c);
+            rows.add(buildEmptyRow("Nothing has been checked yet. Press Run checks again."));
         } else {
             for (SystemCheck.Row row : check.getRows()) {
-                checkPanel.add(buildCheckRow(row), c);
-                c.gridy++;
+                rows.add(buildCheckRow(row));
             }
         }
 
@@ -900,72 +891,120 @@ public class BingoPanel extends PluginPanel {
 
         clearFiltersButton.setEnabled(filter.isActive());
 
-        GridBagConstraints c = new GridBagConstraints();
-        c.fill = GridBagConstraints.HORIZONTAL;
-        c.gridx = 0;
-        c.gridy = 0;
-        c.weightx = 1;
-
         // Filtering and sorting happen over a copy. The snapshot the detector matches drops
         // against is the same object either way, so nothing here can change what is claimable.
         List<BingoTile> tiles = filter.apply(board);
 
+        RowSink rows = new RowSink(itemsPanel);
         if (boardView == BoardView.POSSIBLE_ITEMS) {
-            for (BingoTile tile : tiles) {
-                if (tile.isClaimed()) {
-                    if (hideCompletedTiles) {
-                        continue;
-                    }
-                    for (BingoContribution credited : creditedContributions(tile)) {
-                        if (!filter.showsOption(tile, credited.getName(), true)) {
-                            continue;
-                        }
-                        itemsPanel.add(buildCreditedItemRow(tile, credited), c);
-                        c.gridy++;
-                    }
-                    continue;
-                }
-                Map<Integer, BingoContribution> credited = creditedById(tile);
-                for (BingoItem option : tile.getOptions()) {
-                    BingoContribution counted = credited.get(option.getId());
-                    if (counted == null) {
-                        if (!filter.showsOption(tile, option.getName(), false)) {
-                            continue;
-                        }
-                        itemsPanel.add(buildItemRow(tile, option), c);
-                        c.gridy++;
-                    } else if (!hideCompletedTiles) {
-                        // Keeping the row in place, struck through, is what tells a player
-                        // their drop was credited; dropping it just reshuffles the list.
-                        if (!filter.showsOption(tile, counted.getName(), true)) {
-                            continue;
-                        }
-                        itemsPanel.add(buildCreditedItemRow(tile, counted), c);
-                        c.gridy++;
-                    }
-                }
-            }
+            addOptionRows(rows, tiles, filter, hideCompletedTiles);
         } else {
-            for (BingoTile tile : tiles) {
-                if (hideCompletedTiles && tile.isClaimed()) {
-                    continue;
-                }
-                itemsPanel.add(buildTileRow(tile), c);
-                c.gridy++;
-            }
+            addTileRows(rows, tiles, hideCompletedTiles);
         }
 
-        if (c.gridy == 0 && !board.getTiles().isEmpty()) {
+        if (rows.isEmpty() && !board.getTiles().isEmpty()) {
             // An empty list is otherwise indistinguishable from a board with nothing left,
             // which is the one reading that would make a player stop hunting.
             emptyState = emptyStateFor(filter, hideCompletedTiles);
             if (!emptyState.isEmpty()) {
-                itemsPanel.add(buildEmptyRow(emptyState), c);
+                rows.add(buildEmptyRow(emptyState));
             }
         }
 
         refreshItemsPanel();
         renderCount++;
+    }
+
+    /** One row per tile, which is the view a player watches during an event. */
+    private void addTileRows(RowSink rows, List<BingoTile> tiles, boolean hideCompletedTiles) {
+        for (BingoTile tile : tiles) {
+            if (hideCompletedTiles && tile.isClaimed()) {
+                continue;
+            }
+            rows.add(buildTileRow(tile));
+        }
+    }
+
+    /**
+     * One row per item that could satisfy a tile, for deciding what to hunt.
+     * <p>
+     * A credited item keeps its row, struck through, rather than disappearing: that is what
+     * tells a player their drop was counted. Dropping the row instead just reshuffles the list
+     * under them, which reads like the item was never eligible.
+     */
+    private void addOptionRows(
+        RowSink rows,
+        List<BingoTile> tiles,
+        BoardFilter filter,
+        boolean hideCompletedTiles
+    ) {
+        for (BingoTile tile : tiles) {
+            if (tile.isClaimed()) {
+                // A completed tile has no options left to hunt, so it contributes only the
+                // items that finished it, and only while completed rows are being shown.
+                if (!hideCompletedTiles) {
+                    for (BingoContribution credited : creditedContributions(tile)) {
+                        addCreditedRow(rows, filter, tile, credited);
+                    }
+                }
+                continue;
+            }
+            Map<Integer, BingoContribution> credited = creditedById(tile);
+            for (BingoItem option : tile.getOptions()) {
+                BingoContribution counted = credited.get(option.getId());
+                if (counted == null) {
+                    if (filter.showsOption(tile, option.getName(), false)) {
+                        rows.add(buildItemRow(tile, option));
+                    }
+                } else if (!hideCompletedTiles) {
+                    addCreditedRow(rows, filter, tile, counted);
+                }
+            }
+        }
+    }
+
+    private void addCreditedRow(
+        RowSink rows,
+        BoardFilter filter,
+        BingoTile tile,
+        BingoContribution credited
+    ) {
+        if (filter.showsOption(tile, credited.getName(), true)) {
+            rows.add(buildCreditedItemRow(tile, credited));
+        }
+    }
+
+    /**
+     * Appends rows down a single {@link GridBagLayout} column.
+     * <p>
+     * Owns the row index and the constraints, so a caller adds a row instead of adding a
+     * component and remembering to advance a counter -- which the item view had to do at four
+     * separate call sites. Counting them is also what decides whether an empty-state line is
+     * needed, and that count has to include rows the filters dropped.
+     */
+    private static final class RowSink {
+
+        private final JPanel panel;
+        private final GridBagConstraints constraints = new GridBagConstraints();
+        private int count;
+
+        RowSink(JPanel panel) {
+            this.panel = panel;
+            constraints.fill = GridBagConstraints.HORIZONTAL;
+            constraints.gridx = 0;
+            constraints.gridy = 0;
+            constraints.weightx = 1;
+        }
+
+        void add(JComponent row) {
+            panel.add(row, constraints);
+            constraints.gridy++;
+            count++;
+        }
+
+        boolean isEmpty() {
+            return count == 0;
+        }
     }
 
     private static String emptyStateFor(BoardFilter filter, boolean hideCompletedTiles) {
