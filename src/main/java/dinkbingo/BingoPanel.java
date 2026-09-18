@@ -4,7 +4,6 @@ import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
-import net.runelite.client.util.AsyncBufferedImage;
 import net.runelite.client.util.SwingUtil;
 import org.jetbrains.annotations.Nullable;
 
@@ -136,7 +135,7 @@ public class BingoPanel extends PluginPanel {
     };
 
     /** The button's untinted colour, captured before severity is allowed to change it. */
-    private Color defaultButtonColor;
+    private final Color defaultButtonColor;
 
     /**
      * Whether the board itself wants the filter strip. The report has no rows to filter, so
@@ -191,6 +190,13 @@ public class BingoPanel extends PluginPanel {
     /** When the last test was handed to Dink; null until one has been. EDT-owned. */
     @Nullable
     private Instant lastTestAt;
+
+    /**
+     * Completed render counts, read by tests to wait for the rows they asked for. See
+     * {@link #renderCount()}.
+     */
+    private volatile int renderCount;
+    private volatile int checkRenderCount;
 
     @Inject
     BingoPanel(ItemManager itemManager) {
@@ -558,28 +564,33 @@ public class BingoPanel extends PluginPanel {
      * change a tile.
      */
     void setSystemCheckVisible(boolean visible) {
-        if (visible == showingCheck) {
-            if (visible) {
-                systemCheckHandler.run();
-            }
-            return;
+        boolean swapping = visible != showingCheck;
+        if (swapping) {
+            showingCheck = visible;
+            remove(visible ? itemsScrollPane : checkScrollPane);
+            add(visible ? checkScrollPane : itemsScrollPane, BorderLayout.CENTER);
+            updateFilterBarVisibility();
+            updateSystemCheckButton();
         }
-        showingCheck = visible;
-        remove(visible ? itemsScrollPane : checkScrollPane);
-        add(visible ? checkScrollPane : itemsScrollPane, BorderLayout.CENTER);
-        // The strip filters tile rows, and there are none on screen while the report is up.
-        filterBar.setVisible(filterBarWanted && !showingCheck);
-        updateSystemCheckButton();
+        // Asked for on the way in and on a second press while it is already up, so the rows
+        // are never a stale report the player has to know to refresh. Closing asks for nothing.
         if (visible) {
             systemCheckHandler.run();
         }
-        revalidate();
-        repaint();
+        if (swapping) {
+            revalidate();
+            repaint();
+        }
     }
 
     private void setFilterBarWanted(boolean wanted) {
         filterBarWanted = wanted;
-        filterBar.setVisible(wanted && !showingCheck);
+        updateFilterBarVisibility();
+    }
+
+    /** The strip filters tile rows, and there are none on screen while the report is up. */
+    private void updateFilterBarVisibility() {
+        filterBar.setVisible(filterBarWanted && !showingCheck);
     }
 
     /**
@@ -641,47 +652,31 @@ public class BingoPanel extends PluginPanel {
      * Says up front that the report changes nothing, because the alternative way to find out
      * whether a setup works is to claim a tile with a drop the team cannot get back.
      */
-    private JPanel buildCheckNote() {
+    private static JPanel buildCheckNote() {
         JPanel row = new JPanel(new BorderLayout());
         row.setBackground(ColorScheme.DARK_GRAY_COLOR);
         row.setBorder(BorderFactory.createEmptyBorder(6, 0, 6, 0));
-        // The width hint is what makes a long HTML label wrap instead of clipping in the
-        // fixed-width sidebar.
-        JLabel label = new JLabel("<html><body style='width:100%'>Reads your setup only. "
-            + "Nothing here claims a tile, changes the board, or writes to the "
-            + "sheet.</body></html>");
-        label.setFont(FontManager.getRunescapeSmallFont());
-        label.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
-        row.add(label, BorderLayout.CENTER);
+        row.add(wrappingLabel("Reads your setup only. Nothing here claims a tile, changes the "
+            + "board, or writes to the sheet.", ColorScheme.MEDIUM_GRAY_COLOR),
+            BorderLayout.CENTER);
         return row;
     }
 
-    private JPanel buildCheckRow(SystemCheck.Row check) {
+    private static JPanel buildCheckRow(SystemCheck.Row check) {
         JPanel row = new JPanel(new BorderLayout(0, 2));
         row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
         row.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
 
-        JLabel name = new JLabel(glyph(check.getState()) + " " + check.getName());
-        name.setFont(FontManager.getRunescapeSmallFont());
-        name.setForeground(stateColor(check.getState()));
-        row.add(name, BorderLayout.NORTH);
-
-        // Every value below is escaped: a team name comes from the organizer's sheet and a
-        // backend reason from a deployment the player does not control, and Swing would
-        // otherwise render either as markup.
-        JLabel detail = new JLabel("<html><body style='width:100%'>"
-            + escape(check.getDetail()) + "</body></html>");
-        detail.setFont(FontManager.getRunescapeSmallFont());
-        detail.setForeground(OPEN_COLOR);
-        row.add(detail, BorderLayout.CENTER);
+        row.add(smallLabel(glyph(check.getState()) + " " + check.getName(),
+            stateColor(check.getState())), BorderLayout.NORTH);
+        // The detail and the remedy are wrapped, which escapes them. A team name comes from
+        // the organizer's sheet and a backend reason from a deployment the player does not
+        // control, and Swing would otherwise render either as markup.
+        row.add(wrappingLabel(check.getDetail(), OPEN_COLOR), BorderLayout.CENTER);
 
         String action = check.getAction();
         if (action != null) {
-            JLabel remedy = new JLabel("<html><body style='width:100%'>" + escape(action)
-                + "</body></html>");
-            remedy.setFont(FontManager.getRunescapeSmallFont());
-            remedy.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-            row.add(remedy, BorderLayout.SOUTH);
+            row.add(wrappingLabel(action, ColorScheme.LIGHT_GRAY_COLOR), BorderLayout.SOUTH);
         }
 
         return row;
@@ -737,8 +732,6 @@ public class BingoPanel extends PluginPanel {
     boolean isShowingSystemCheck() {
         return showingCheck;
     }
-
-    private volatile int checkRenderCount;
 
     /** How many report renders have finished; the same test seam as {@link #renderCount()}. */
     int checkRenderCount() {
@@ -855,19 +848,11 @@ public class BingoPanel extends PluginPanel {
      * {@code backendError} is the raw {@code error} value from the response.
      */
     public void renderLoadError(String backendError) {
-        String reason = describeBackendError(backendError);
+        // The wording lives in BingoErrors alongside the claim-failure phrasing, so the
+        // sidebar and the chat line cannot drift apart.
+        String reason = BingoErrors.describeBoardError(backendError);
         showingBoard = false;
         SwingUtilities.invokeLater(() -> renderMessage("Couldn't load board", reason));
-    }
-
-    /**
-     * Turns a backend {@code error} value into something an organizer can act on.
-     * <p>
-     * The wording lives in {@link BingoErrors} alongside the claim-failure phrasing for the
-     * same reason, so the two surfaces cannot drift apart.
-     */
-    static String describeBackendError(@Nullable String backendError) {
-        return BingoErrors.describeBoardError(backendError);
     }
 
     private void renderOnEdt(
@@ -883,29 +868,17 @@ public class BingoPanel extends PluginPanel {
         lastHideCompletedTiles = hideCompletedTiles;
         emptyState = "";
 
-        SwingUtil.fastRemoveAll(itemsPanel);
-
         if (!configured) {
-            headerLabel.setText("Not configured");
-            statusLabel.setForeground(LIVE_STATUS_COLOR);
-            statusLabel.setText("Set a Backend URL in the config");
-            freshnessLabel.setVisible(false);
-            setFilterBarWanted(false);
-            refreshItemsPanel();
-            renderCount++;
+            renderMessage("Not configured", "Set a Backend URL in the config");
             return;
         }
 
         if (!board.isConfigured()) {
-            headerLabel.setText("No team");
-            statusLabel.setForeground(LIVE_STATUS_COLOR);
-            statusLabel.setText("Your RSN is not on the Teams tab");
-            freshnessLabel.setVisible(false);
-            setFilterBarWanted(false);
-            refreshItemsPanel();
-            renderCount++;
+            renderMessage("No team", "Your RSN is not on the Teams tab");
             return;
         }
+
+        SwingUtil.fastRemoveAll(itemsPanel);
 
         headerLabel.setText(staleReason == null
             ? board.getTeam() : board.getTeam() + " \u2014 not live");
@@ -1006,27 +979,27 @@ public class BingoPanel extends PluginPanel {
         return "";
     }
 
-    private JPanel buildEmptyRow(String message) {
+    private static JPanel buildEmptyRow(String message) {
         JPanel row = new JPanel(new BorderLayout());
         row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
         row.setBorder(BorderFactory.createEmptyBorder(8, 6, 8, 6));
-        // The width hint is what makes a long HTML label wrap instead of clipping in the
-        // fixed-width sidebar.
-        JLabel label = new JLabel("<html><body style='width:100%'>" + escape(message)
-            + "</body></html>");
-        label.setFont(FontManager.getRunescapeSmallFont());
-        label.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-        row.add(label, BorderLayout.CENTER);
+        row.add(wrappingLabel(message, ColorScheme.LIGHT_GRAY_COLOR), BorderLayout.CENTER);
         return row;
     }
 
+    /**
+     * Replace the rows with a header and one explanatory line.
+     * <p>
+     * Every screen that has no tiles on it goes through here -- loading, a failed or refused
+     * fetch, no backend configured, no team -- so they cannot drift apart on whether they
+     * clear the freshness line or hide the filter strip. Both must go: there is nothing for
+     * either to describe.
+     */
     private void renderMessage(String header, String status) {
         SwingUtil.fastRemoveAll(itemsPanel);
         headerLabel.setText(header);
         statusLabel.setForeground(LIVE_STATUS_COLOR);
         statusLabel.setText(status);
-        // There are no rows on screen, so there is nothing for a freshness line or a filter
-        // control to act on.
         freshnessLabel.setVisible(false);
         setFilterBarWanted(false);
         refreshItemsPanel();
@@ -1090,8 +1063,6 @@ public class BingoPanel extends PluginPanel {
         this.clock = clock;
     }
 
-    private volatile int renderCount;
-
     /**
      * How many renders have finished. A test seam, and one the panel cannot do without.
      * <p>
@@ -1110,40 +1081,18 @@ public class BingoPanel extends PluginPanel {
     }
 
     private JPanel buildTileRow(BingoTile tile) {
-        JPanel row = new JPanel(new BorderLayout(6, 0));
-        row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-        row.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
-
-        JLabel icon = new JLabel();
-        icon.setPreferredSize(new Dimension(36, 32));
+        JPanel row = itemRowPanel();
         Map<Integer, BingoContribution> creditedItems = creditedById(tile);
-        BingoItem iconItem = tile.getClaimedItem();
-        if (iconItem == null) {
-            for (BingoItem option : tile.getOptions()) {
-                if (!creditedItems.containsKey(option.getId())) {
-                    iconItem = option;
-                    break;
-                }
-            }
-        }
-        if (iconItem != null) {
-            AsyncBufferedImage image = itemManager.getImage(iconItem.getId());
-            image.addTo(icon);
-        }
-        row.add(icon, BorderLayout.WEST);
+        row.add(itemIcon(tileIconItem(tile, creditedItems)), BorderLayout.WEST);
 
-        JLabel name = new JLabel();
-        name.setFont(FontManager.getRunescapeSmallFont());
+        JLabel name;
         if (tile.isClaimed()) {
             String winner = tile.getClaimedItem() != null ? tile.getClaimedItem().getName() : null;
-            // Strikethrough via HTML is the only way to get it on a plain JLabel.
-            name.setText("<html><s>" + escape(tile.getName()) + "</s></html>");
-            name.setForeground(CLAIMED_COLOR);
+            name = smallLabel(struckThrough(tile.getName()), CLAIMED_COLOR);
             name.setToolTipText("Claimed by " + tile.getClaimedBy() +
                 (winner == null ? "" : " with " + winner));
         } else {
-            name.setText(tile.getName());
-            name.setForeground(OPEN_COLOR);
+            name = smallLabel(tile.getName(), OPEN_COLOR);
             StringJoiner credited = new StringJoiner(", ");
             for (BingoContribution contribution : tile.getClaimedItems()) {
                 credited.add(contribution.getName());
@@ -1158,45 +1107,61 @@ public class BingoPanel extends PluginPanel {
         row.add(name, BorderLayout.CENTER);
 
         if (tile.isClaimed() && tile.getClaimedBy() != null) {
-            JLabel by = new JLabel(tile.getClaimedBy());
-            by.setFont(FontManager.getRunescapeSmallFont());
-            by.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
-            row.add(by, BorderLayout.EAST);
-        } else if (tile.getRequired() > 1 || tile.getProgress() > 0) {
-            JLabel progress = new JLabel(tile.getProgress() + "/" + tile.getRequired());
-            progress.setFont(FontManager.getRunescapeSmallFont());
-            progress.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
-            row.add(progress, BorderLayout.EAST);
+            row.add(smallLabel(tile.getClaimedBy(), ColorScheme.PROGRESS_COMPLETE_COLOR),
+                BorderLayout.EAST);
+        } else {
+            addProgressLabel(row, tile, null);
         }
 
         return row;
     }
 
     private JPanel buildItemRow(BingoTile tile, BingoItem option) {
-        JPanel row = new JPanel(new BorderLayout(6, 0));
-        row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-        row.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+        JPanel row = itemRowPanel();
+        row.add(itemIcon(option), BorderLayout.WEST);
 
-        JLabel icon = new JLabel();
-        icon.setPreferredSize(new Dimension(36, 32));
-        itemManager.getImage(option.getId()).addTo(icon);
-        row.add(icon, BorderLayout.WEST);
-
-        JLabel name = new JLabel(option.getName());
-        name.setFont(FontManager.getRunescapeSmallFont());
-        name.setForeground(OPEN_COLOR);
+        JLabel name = smallLabel(option.getName(), OPEN_COLOR);
         name.setToolTipText("Eligible for " + tile.getName());
         row.add(name, BorderLayout.CENTER);
 
-        if (tile.getRequired() > 1 || tile.getProgress() > 0) {
-            JLabel progress = new JLabel(tile.getProgress() + "/" + tile.getRequired());
-            progress.setFont(FontManager.getRunescapeSmallFont());
-            progress.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
-            progress.setToolTipText(tile.getName());
-            row.add(progress, BorderLayout.EAST);
-        }
+        addProgressLabel(row, tile, tile.getName());
 
         return row;
+    }
+
+    /**
+     * The item whose icon stands for the tile: the winning drop once it is complete, and
+     * otherwise the first option still worth hunting. Null only for a tile with no options at
+     * all, which leaves the icon slot blank rather than guessing.
+     */
+    @Nullable
+    private static BingoItem tileIconItem(
+        BingoTile tile,
+        Map<Integer, BingoContribution> creditedItems
+    ) {
+        if (tile.getClaimedItem() != null) {
+            return tile.getClaimedItem();
+        }
+        for (BingoItem option : tile.getOptions()) {
+            if (!creditedItems.containsKey(option.getId())) {
+                return option;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The {@code n/m} counter, shown only once there is something to count. A one-of-one tile
+     * with no progress would otherwise read "0/1", which is just the open state spelled out.
+     */
+    private static void addProgressLabel(JPanel row, BingoTile tile, @Nullable String tooltip) {
+        if (tile.getRequired() <= 1 && tile.getProgress() <= 0) {
+            return;
+        }
+        JLabel progress = smallLabel(tile.getProgress() + "/" + tile.getRequired(),
+            ColorScheme.PROGRESS_INPROGRESS_COLOR);
+        progress.setToolTipText(tooltip);
+        row.add(progress, BorderLayout.EAST);
     }
 
     /**
@@ -1214,23 +1179,13 @@ public class BingoPanel extends PluginPanel {
     }
 
     private JPanel buildCreditedItemRow(BingoTile tile, BingoContribution credited) {
-        JPanel row = new JPanel(new BorderLayout(6, 0));
-        row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-        row.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
-
-        JLabel icon = new JLabel();
-        icon.setPreferredSize(new Dimension(36, 32));
-        itemManager.getImage(credited.getId()).addTo(icon);
-        row.add(icon, BorderLayout.WEST);
+        JPanel row = itemRowPanel();
+        row.add(itemIcon(credited.getId()), BorderLayout.WEST);
 
         String claimedBy = credited.getClaimedBy() != null
             ? credited.getClaimedBy() : tile.getClaimedBy();
 
-        JLabel name = new JLabel();
-        name.setFont(FontManager.getRunescapeSmallFont());
-        // Strikethrough via HTML is the only way to get it on a plain JLabel.
-        name.setText("<html><s>" + escape(credited.getName()) + "</s></html>");
-        name.setForeground(CLAIMED_COLOR);
+        JLabel name = smallLabel(struckThrough(credited.getName()), CLAIMED_COLOR);
         name.setToolTipText((tile.isClaimed()
             ? "Completed " + tile.getName()
             : "Already counted toward " + tile.getName())
@@ -1238,10 +1193,8 @@ public class BingoPanel extends PluginPanel {
         row.add(name, BorderLayout.CENTER);
 
         if (claimedBy != null) {
-            JLabel by = new JLabel(claimedBy);
-            by.setFont(FontManager.getRunescapeSmallFont());
-            by.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
-            row.add(by, BorderLayout.EAST);
+            row.add(smallLabel(claimedBy, ColorScheme.PROGRESS_COMPLETE_COLOR),
+                BorderLayout.EAST);
         }
 
         return row;
@@ -1253,6 +1206,73 @@ public class BingoPanel extends PluginPanel {
             credited.put(contribution.getId(), contribution);
         }
         return credited;
+    }
+
+    // ------------------------------------------------------------------
+    // widget helpers
+    //
+    // Every row in both views is the same shape -- a dark panel of small-font labels, some of
+    // them wrapped, some carrying an item icon -- so the shape lives here once. Building it
+    // inline per row is how three row builders drifted into three slightly different paddings
+    // and two different ways of escaping a name.
+    // ------------------------------------------------------------------
+
+    /** The standard tile/item row: dark, padded, and laid out icon / name / trailing label. */
+    private static JPanel itemRowPanel() {
+        JPanel row = new JPanel(new BorderLayout(6, 0));
+        row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+        row.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+        return row;
+    }
+
+    private static JLabel smallLabel(String text, Color foreground) {
+        JLabel label = new JLabel(text);
+        label.setFont(FontManager.getRunescapeSmallFont());
+        label.setForeground(foreground);
+        return label;
+    }
+
+    /**
+     * A label that wraps rather than clipping, for anything longer than a few words.
+     * <p>
+     * The width hint is what makes an HTML label wrap in the fixed-width sidebar. Wrapping
+     * means rendering as HTML, so the text is escaped here rather than at each call site --
+     * most of these strings come from the organizer's sheet or the backend.
+     */
+    private static JLabel wrappingLabel(String text, Color foreground) {
+        return smallLabel("<html><body style='width:100%'>" + escape(text) + "</body></html>",
+            foreground);
+    }
+
+    /**
+     * An item icon slot of fixed size, so rows line up whether or not an image has loaded.
+     * <p>
+     * A null item leaves the slot blank rather than dropping it, which keeps the names in one
+     * column on a tile that has no options to picture.
+     */
+    private JLabel itemIcon(@Nullable BingoItem item) {
+        JLabel icon = emptyIcon();
+        if (item != null) {
+            itemManager.getImage(item.getId()).addTo(icon);
+        }
+        return icon;
+    }
+
+    private JLabel itemIcon(int itemId) {
+        JLabel icon = emptyIcon();
+        itemManager.getImage(itemId).addTo(icon);
+        return icon;
+    }
+
+    private static JLabel emptyIcon() {
+        JLabel icon = new JLabel();
+        icon.setPreferredSize(new Dimension(36, 32));
+        return icon;
+    }
+
+    /** Strikethrough via HTML is the only way to get it on a plain JLabel. */
+    private static String struckThrough(String text) {
+        return "<html><s>" + escape(text) + "</s></html>";
     }
 
     private static String escape(String text) {
