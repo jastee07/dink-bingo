@@ -136,13 +136,78 @@ function output(result) {
   return JSON.parse(result.text);
 }
 
+// setupLeaderboard's formulas, captured by running it against a recording sheet.
+//
+// Previously these were scraped out of Code.gs with a regex over the source text and
+// re-evaluated, which only worked while every formula was one self-contained literal laid out
+// in exactly the expected shape. Running the real function instead tests what an organizer
+// would actually get, and does not care how the formula is assembled.
+const leaderboardFormulas = (() => {
+  const formulas = {};
+  const range = cell => ({
+    setFormula(formula) {
+      formulas[cell] = formula;
+      return this;
+    },
+    setValue() {
+      return this;
+    },
+    setValues() {
+      return this;
+    },
+    setBackground() {
+      return this;
+    },
+    setFontWeight() {
+      return this;
+    },
+    setFontColor() {
+      return this;
+    },
+    setFontSize() {
+      return this;
+    },
+    setNumberFormat() {
+      return this;
+    },
+    clearContent() {
+      return this;
+    }
+  });
+  const sheet = {
+    getRange: range,
+    getMaxColumns: () => 100,
+    insertColumnsAfter() {},
+    setColumnWidth() {},
+    setColumnWidths() {},
+    setFrozenColumns() {},
+    setTabColor() {},
+    setConditionalFormatRules() {}
+  };
+  // setupLeaderboard builds conditional format rules; the chained builder is stubbed here
+  // because the rules themselves are formatting, not the derived values under test.
+  const ruleBuilder = {
+    whenTextStartsWith: () => ruleBuilder,
+    whenTextDoesNotContain: () => ruleBuilder,
+    setBackground: () => ruleBuilder,
+    setFontColor: () => ruleBuilder,
+    setRanges: () => ruleBuilder,
+    build: () => ({})
+  };
+  const previous = context.SpreadsheetApp.newConditionalFormatRule;
+  context.SpreadsheetApp.newConditionalFormatRule = () => ruleBuilder;
+  try {
+    context.setupLeaderboard(sheet);
+  } finally {
+    context.SpreadsheetApp.newConditionalFormatRule = previous;
+  }
+  return formulas;
+})();
+
 function generatedFormula(cell) {
-  const pattern = new RegExp(
-    `sh\\.getRange\\('${cell}'\\)\\.setFormula\\(\\n([\\s\\S]*?)\\n  \\);`
-  );
-  const match = code.match(pattern);
-  assert(match, `missing generated formula for ${cell}`);
-  return vm.runInNewContext(match[1].trim());
+  const formula = leaderboardFormulas[cell];
+  assert(formula, `missing generated formula for ${cell}`);
+  return formula;
 }
 
 function assertBalancedFormula(cell) {
@@ -561,6 +626,46 @@ assert(
 assert(
   generatedFormula("E26").includes('progress&\"/\"&needed'),
   "the team matrix must display partial K-of-N progress"
+);
+
+// Completed and Remaining Tiles must partition the board, as must Points and Remaining
+// Points. They are the same count either side of the threshold, so the pair has to differ
+// only in the comparator: any other difference means a team's completed and remaining columns
+// no longer add up to the whole board.
+[["B5", "D5"], ["C5", "E5"]].forEach(([done, left]) => {
+  assert.strictEqual(
+    generatedFormula(done).replace(">=needed", "<needed"),
+    generatedFormula(left),
+    `${done} and ${left} must be the same expression either side of the threshold`
+  );
+});
+
+// Every column that reads required_count has to default a blank one to 1, exactly as
+// buildTileCatalog does, or a tile the organizer left blank reads as unreachable.
+["B5", "C5", "D5", "E5", "E26"].forEach(cell => {
+  assert(
+    generatedFormula(cell).includes('IF(value="",1,value)'),
+    cell + " must treat a blank required_count as 1, as the backend does"
+  );
+});
+
+// A tab's header row is the backend's contract with the sheet, so the two ways of creating
+// one must agree. setupSheet builds every tab from SHEET_HEADERS and upgradeGroupedTiles adds
+// Attempts from the same place; a hand-written second copy is how a column gets added for new
+// events and forgotten for upgraded ones.
+// Array.from because SHEET_HEADERS is built inside the vm context and its arrays carry that
+// context's prototype, which deepStrictEqual compares.
+["Items", "Teams", "Claims", "Audit", "Attempts", "Config"].forEach(tab => {
+  assert.deepStrictEqual(
+    Array.from(context.SHEET_HEADERS[tab]),
+    sheets[tab][0],
+    tab + "'s schema must match the header row these tests run against"
+  );
+});
+const upgradeSource = code.slice(code.indexOf("function upgradeGroupedTiles"));
+assert(
+  !/appendRow\(\s*\[\s*'claim_id'/.test(upgradeSource),
+  "upgradeGroupedTiles must create Attempts from SHEET_HEADERS, not its own column list"
 );
 
 // ---------------------------------------------------------------------------

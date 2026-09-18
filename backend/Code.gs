@@ -23,6 +23,27 @@ var SHEET_CONFIG = 'Config';
 var SHEET_ATTEMPTS = 'Attempts';
 var SHEET_LEADERBOARD = 'Leaderboard';
 
+// The header row of every tab this script owns, in column order. setupSheet creates them from
+// here and upgradeGroupedTiles adds Attempts from here, so a column cannot be added to a tab
+// for new sheets and forgotten for upgraded ones.
+var SHEET_HEADERS = {};
+SHEET_HEADERS[SHEET_ITEMS] = [
+  'tile_id', 'tile_name', 'item_id', 'item_name', 'points', 'required_count', 'notes'
+];
+SHEET_HEADERS[SHEET_TEAMS] = ['rsn', 'team'];
+SHEET_HEADERS[SHEET_CLAIMS] = [
+  'team', 'tile_id', 'tile_name', 'item_id', 'item_name', 'rsn', 'claimed_at', 'claim_id',
+  'source', 'progress_after', 'completed_tile'
+];
+SHEET_HEADERS[SHEET_AUDIT] = [
+  'ts', 'rsn', 'item_id', 'result', 'notes', 'raw_payload', 'tile_id'
+];
+SHEET_HEADERS[SHEET_ATTEMPTS] = [
+  'claim_id', 'rsn', 'team', 'item_id', 'status', 'tile_id', 'tile_name', 'item_name',
+  'complete', 'recorded_at'
+];
+SHEET_HEADERS[SHEET_CONFIG] = ['key', 'value'];
+
 // Stay below the RuneLite HTTP client's read timeout so callers can receive retryable=true.
 var LOCK_TIMEOUT_MS = 5000;
 
@@ -218,12 +239,11 @@ function handleClaim(body) {
       }
     }
 
+    // Every rejection below goes through rejectClaim: each one must write an Audit row and a
+    // ledger row before it answers, or a retry of the same claimId is re-evaluated against
+    // whatever the state has become and can return a different outcome. See readAttempts.
     if (!eventOpen(cfg)) {
-      auditLocked(rsn, itemId, 'event_closed', body, '');
-      recordAttempt(attempts, body.claimId, {
-        rsn: rsn, itemId: itemId, status: 'event_closed'
-      });
-      return json({ status: 'event_closed' });
+      return rejectClaim(attempts, body, { status: 'event_closed', rsn: rsn, itemId: itemId });
     }
 
     // Past the replay check, so an ambiguous Teams tab can now fail visibly without stranding
@@ -231,52 +251,37 @@ function handleClaim(body) {
     var member = rosterMember(requireRoster(roster), rsn);
     var team = member ? member.team : null;
     if (!team) {
-      auditLocked(rsn, itemId, 'not_on_team', body, '');
-      recordAttempt(attempts, body.claimId, {
-        rsn: rsn, itemId: itemId, status: 'not_on_team'
-      });
-      return json({ status: 'not_on_team' });
+      return rejectClaim(attempts, body, { status: 'not_on_team', rsn: rsn, itemId: itemId });
     }
 
     var tile = catalog.byItemId[itemId];
     if (!tile) {
-      auditLocked(rsn, itemId, 'not_on_board', body, '');
-      recordAttempt(attempts, body.claimId, {
-        rsn: rsn, team: team, itemId: itemId, status: 'not_on_board',
-        itemName: body.itemName
+      return rejectClaim(attempts, body, {
+        status: 'not_on_board', rsn: rsn, team: team, itemId: itemId, itemName: body.itemName
       });
-      return json({ status: 'not_on_board' });
     }
     body.tileId = tile.id;
     var item = findOption(tile, itemId);
 
     var state = getClaimState(claims, team, tile.id);
     if (tileComplete(tile, state)) {
-      var completion = state.contributions[tile.required - 1];
-      auditLocked(rsn, itemId, 'duplicate', body, 'tile already complete');
-      var completedDuplicate = claimResult(
-        'duplicate', false, team, tile, completion, state, claims, catalog
-      );
-      completedDuplicate.duplicateReason = 'tile_complete';
-      recordAttempt(attempts, body.claimId, {
-        rsn: rsn, team: team, itemId: itemId, status: 'duplicate',
-        tileId: tile.id, tileName: tile.name, itemName: item.name, complete: true
+      return rejectClaim(attempts, body, {
+        status: 'duplicate', rsn: rsn, team: team, itemId: itemId,
+        tileId: tile.id, tileName: tile.name, itemName: item.name, complete: true,
+        notes: 'tile already complete',
+        response: duplicateResult('tile_complete', team, tile,
+          state.contributions[tile.required - 1], state, claims, catalog)
       });
-      return json(completedDuplicate);
     }
 
     var existing = state.byItemId[itemId];
     if (existing) {
-      auditLocked(rsn, itemId, 'duplicate', body, 'item already contributed by ' + existing.rsn);
-      var itemDuplicate = claimResult(
-        'duplicate', false, team, tile, existing, state, claims, catalog
-      );
-      itemDuplicate.duplicateReason = 'item_recorded';
-      recordAttempt(attempts, body.claimId, {
-        rsn: rsn, team: team, itemId: itemId, status: 'duplicate',
-        tileId: tile.id, tileName: tile.name, itemName: item.name, complete: false
+      return rejectClaim(attempts, body, {
+        status: 'duplicate', rsn: rsn, team: team, itemId: itemId,
+        tileId: tile.id, tileName: tile.name, itemName: item.name, complete: false,
+        notes: 'item already contributed by ' + existing.rsn,
+        response: duplicateResult('item_recorded', team, tile, existing, state, claims, catalog)
       });
-      return json(itemDuplicate);
     }
 
     var now = new Date();
@@ -412,6 +417,45 @@ function sheet(name) {
   var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
   if (!sh) throw new Error('missing sheet tab: ' + name);
   return sh;
+}
+
+/**
+ * Create a tab from SHEET_HEADERS if it is missing, and give it its header row if it is empty.
+ *
+ * Deliberately never touches an existing header row: an organizer's event data is below it,
+ * and rewriting the row would silently change which column the backend reads. Column
+ * migrations belong in upgradeGroupedTiles, which backfills as it goes.
+ */
+function ensureTab(ss, name) {
+  var headers = SHEET_HEADERS[name];
+  if (!headers) throw new Error('no header definition for tab: ' + name);
+  var sh = ss.getSheetByName(name);
+  if (!sh) sh = ss.insertSheet(name);
+  if (sh.getLastRow() === 0) {
+    sh.appendRow(headers);
+    sh.setFrozenRows(1);
+    sh.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+  }
+  return sh;
+}
+
+/**
+ * Format a tab's tile_id column as plain text, if it has one.
+ *
+ * A tile_id is an identifier even when it reads as a number, so "007" must stay "007" rather
+ * than becoming 7 and no longer matching the Items row it names.
+ *
+ * The column is located from the header row rather than hardcoded per tab: Items, Claims, and
+ * Attempts each keep it in a different place, and a tab that predates the grouped-tile schema
+ * has no tile_id column at all -- formatting a fixed column letter would then reformat
+ * whatever else happens to be there. Does nothing for a tab without the column, which is what
+ * makes it safe to call on every tab.
+ */
+function formatTileIdColumn(sh) {
+  var headers = sh.getDataRange().getValues()[0] || [];
+  var index = headerMap(headers).tile_id;
+  if (index == null) return;
+  sh.getRange(1, index + 1, sh.getMaxRows(), 1).setNumberFormat('@');
 }
 
 function readConfig() {
@@ -619,6 +663,32 @@ function recordAttempt(attempts, claimId, fields) {
     // written. The cost is that this one claim id can still drift on a later retry.
     console.error('attempt ledger write failed: ' + err);
   }
+}
+
+/**
+ * Answer a terminal rejection, recording it the two ways every rejection has to be recorded.
+ *
+ * The Audit row is the organizer's trail and the Attempts row is what makes the claim id
+ * replay the same answer. Writing one without the other is the bug this exists to prevent: an
+ * un-ledgered rejection is re-decided on the next retry against whatever Teams, Items, and the
+ * event window have become since.
+ *
+ * `fields` carries the ledger row (status, rsn, team, itemId, tileId, tileName, itemName,
+ * complete) plus two things that are not stored: `notes` for the Audit row, and `response` for
+ * a body richer than a bare status, as a duplicate's is. recordAttempt copies named fields
+ * only, so neither reaches the sheet -- but never put a token or any other Config value here.
+ */
+function rejectClaim(attempts, request, fields) {
+  auditLocked(fields.rsn, fields.itemId, fields.status, request, fields.notes || '');
+  recordAttempt(attempts, request.claimId, fields);
+  return json(fields.response || { status: fields.status });
+}
+
+/** A duplicate's response body, which says which kind of duplicate it was. */
+function duplicateResult(reason, team, tile, contribution, state, claims, catalog) {
+  var result = claimResult('duplicate', false, team, tile, contribution, state, claims, catalog);
+  result.duplicateReason = reason;
+  return result;
 }
 
 /** Rebuild the original terminal response from its ledger row. */
@@ -1012,32 +1082,14 @@ function setupSheet() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
 
   var tabs = {};
-  tabs[SHEET_ITEMS] = [
-    'tile_id', 'tile_name', 'item_id', 'item_name', 'points', 'required_count', 'notes'
-  ];
-  tabs[SHEET_TEAMS] = ['rsn', 'team'];
-  tabs[SHEET_CLAIMS] = [
-    'team', 'tile_id', 'tile_name', 'item_id', 'item_name', 'rsn', 'claimed_at', 'claim_id',
-    'source', 'progress_after', 'completed_tile'
-  ];
-  tabs[SHEET_AUDIT] = ['ts', 'rsn', 'item_id', 'result', 'notes', 'raw_payload', 'tile_id'];
-  tabs[SHEET_ATTEMPTS] = [
-    'claim_id', 'rsn', 'team', 'item_id', 'status', 'tile_id', 'tile_name', 'item_name',
-    'complete', 'recorded_at'
-  ];
-  tabs[SHEET_CONFIG] = ['key', 'value'];
-
-  for (var name in tabs) {
-    var sh = ss.getSheetByName(name);
-    if (!sh) sh = ss.insertSheet(name);
-    if (sh.getLastRow() === 0) {
-      sh.appendRow(tabs[name]);
-      sh.setFrozenRows(1);
-      sh.getRange(1, 1, 1, tabs[name].length).setFontWeight('bold');
-    }
+  for (var name in SHEET_HEADERS) {
+    tabs[name] = ensureTab(ss, name);
+    // Items, Claims, and Attempts each hold a tile_id, and a fresh Attempts tab used to be
+    // the one that did not get this, so an organizer's "007" became 7 there and nowhere else.
+    formatTileIdColumn(tabs[name]);
   }
 
-  var cfg = ss.getSheetByName(SHEET_CONFIG);
+  var cfg = tabs[SHEET_CONFIG];
   if (cfg.getLastRow() <= 1) {
     cfg.appendRow(['token', Utilities.getUuid()]);
     cfg.appendRow(['admin_token', Utilities.getUuid()]);
@@ -1045,18 +1097,11 @@ function setupSheet() {
     cfg.appendRow(['event_end', '']);
   }
 
-  var items = ss.getSheetByName(SHEET_ITEMS);
-  if (headerMap(items.getDataRange().getValues()[0]).tile_id != null) {
-    items.getRange('A:A').setNumberFormat('@');
-  }
+  var items = tabs[SHEET_ITEMS];
   if (items.getLastRow() <= 1) {
     items.appendRow(['11832', 'Bandos chestplate', 11832, 'Bandos chestplate', 1, 1, '']);
     items.appendRow(['21034', 'Dexterous prayer scroll', 21034, 'Dexterous prayer scroll', 1, 1, '']);
     items.appendRow(['4151', 'Abyssal whip', 4151, 'Abyssal whip', 1, 1, '']);
-  }
-  var claims = ss.getSheetByName(SHEET_CLAIMS);
-  if (headerMap(claims.getDataRange().getValues()[0]).tile_id != null) {
-    claims.getRange('B:B').setNumberFormat('@');
   }
 
   var leaderboard = ss.getSheetByName(SHEET_LEADERBOARD);
@@ -1155,20 +1200,7 @@ function upgradeGroupedTiles() {
 
     // Terminal-rejection ledger. Without it a retry after a lost response is re-evaluated
     // against current state and can return a different answer for the same claim id.
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var attempts = ss.getSheetByName(SHEET_ATTEMPTS);
-    if (!attempts) attempts = ss.insertSheet(SHEET_ATTEMPTS);
-    if (attempts.getLastRow() === 0) {
-      var attemptHeaders = [
-        'claim_id', 'rsn', 'team', 'item_id', 'status', 'tile_id', 'tile_name', 'item_name',
-        'complete', 'recorded_at'
-      ];
-      attempts.appendRow(attemptHeaders);
-      attempts.setFrozenRows(1);
-      attempts.getRange(1, 1, 1, attemptHeaders.length).setFontWeight('bold');
-    }
-    // tile_id is a text identifier even when it looks like a number, as on Items and Claims.
-    attempts.getRange('F:F').setNumberFormat('@');
+    formatTileIdColumn(ensureTab(SpreadsheetApp.getActiveSpreadsheet(), SHEET_ATTEMPTS));
 
     SpreadsheetApp.flush();
     setupLeaderboard(sheet(SHEET_LEADERBOARD));
@@ -1247,6 +1279,65 @@ function scrubLegacySensitiveData() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// leaderboard formula fragments
+//
+// The derived columns are five variations on one question: for each team and each tile, how
+// many distinct items has that team contributed, and is that at least the tile's threshold?
+// Every column needs the same sub-expressions to ask it, and they were written out once per
+// column -- so "required_count is blank, treat it as 1" appeared four times, and a correction
+// to any of these rules had to be made in every copy or the columns would stop adding up.
+//
+// They are spreadsheet source text, not JavaScript, and they name the LET bindings the
+// formulas below declare: TEAMS and TILE_IDS stand alone, REQUIRED reads `tileIds`, and
+// PROGRESS reads `team` and `tileId`.
+// ---------------------------------------------------------------------------
+
+/** Every team on the Teams tab, deduplicated and sorted, ignoring blank padding rows. */
+var TEAMS = 'SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>"")))';
+
+/** Every logical tile on the Items tab, in first-seen order. */
+var TILE_IDS = 'UNIQUE(FILTER(Items!A2:A,Items!A2:A<>""))';
+
+/** Each tile's threshold, defaulting a blank required_count to 1, as the backend does. */
+var REQUIRED = 'MAP(tileIds,LAMBDA(tileId,LET(value,' +
+  'INDEX(FILTER(Items!F2:F,Items!A2:A=tileId),1),IF(value="",1,value))))';
+
+/** Each tile's points value, which may be blank; the callers default it to 1. */
+var TILE_POINTS = 'MAP(tileIds,LAMBDA(tileId,INDEX(FILTER(Items!E2:E,Items!A2:A=tileId),1)))';
+
+/**
+ * How many distinct items a team has contributed to a tile.
+ *
+ * The trailing "<>" is load-bearing: without it COUNTUNIQUEIFS counts "no matches" as one
+ * distinct value, so every team would show one item of progress on every tile.
+ */
+var PROGRESS = 'COUNTUNIQUEIFS(Claims!D2:D,Claims!A2:A,team,Claims!B2:B,tileId,' +
+  'Claims!D2:D,"<>")';
+
+/**
+ * Tiles per team, counting those whose progress stands in the given relation to the
+ * threshold: '>=' for completed, '<' for remaining.
+ */
+function tileCountFormula(comparator) {
+  return '=IFERROR(LET(teams,' + TEAMS + ',' +
+    'tileIds,' + TILE_IDS + ',' +
+    'required,' + REQUIRED + ',' +
+    'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,required,LAMBDA(tileId,needed,' +
+    'IF(' + PROGRESS + comparator + 'needed,1,0))))))),"")';
+}
+
+/** The same split as {@link tileCountFormula}, weighted by each tile's points. */
+function tilePointsFormula(comparator) {
+  return '=IFERROR(LET(teams,' + TEAMS + ',' +
+    'tileIds,' + TILE_IDS + ',' +
+    'tilePoints,' + TILE_POINTS + ',' +
+    'required,' + REQUIRED + ',' +
+    'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,tilePoints,required,LAMBDA(tileId,points,needed,' +
+    'IF(' + PROGRESS + comparator + 'needed,' +
+    'IF(points="",1,points),0))))))),"")';
+}
+
 /**
  * Creates a derived, read-only event view. Claims remains authoritative; these formulas
  * only summarize it and recalculate automatically when Items, Teams, or Claims changes.
@@ -1266,49 +1357,14 @@ function setupLeaderboard(sh) {
   sh.getRange('A4:E4').setValues([
     ['Team', 'Completed', 'Points', 'Remaining Tiles', 'Remaining Points']
   ]);
-  sh.getRange('A5').setFormula(
-    '=IFERROR(SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),"")'
-  );
-  sh.getRange('B5').setFormula(
-    '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
-    'tileIds,UNIQUE(FILTER(Items!A2:A,Items!A2:A<>"")),' +
-    'required,MAP(tileIds,LAMBDA(tileId,LET(value,' +
-    'INDEX(FILTER(Items!F2:F,Items!A2:A=tileId),1),IF(value="",1,value)))),' +
-    'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,required,LAMBDA(tileId,needed,' +
-    'IF(COUNTUNIQUEIFS(Claims!D2:D,Claims!A2:A,team,Claims!B2:B,tileId,' +
-    'Claims!D2:D,"<>")>=needed,1,0))))))),"")'
-  );
-  sh.getRange('C5').setFormula(
-    '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
-    'tileIds,UNIQUE(FILTER(Items!A2:A,Items!A2:A<>"")),' +
-    'tilePoints,MAP(tileIds,LAMBDA(tileId,INDEX(FILTER(Items!E2:E,Items!A2:A=tileId),1))),' +
-    'required,MAP(tileIds,LAMBDA(tileId,LET(value,' +
-    'INDEX(FILTER(Items!F2:F,Items!A2:A=tileId),1),IF(value="",1,value)))),' +
-    'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,tilePoints,required,LAMBDA(tileId,points,needed,' +
-    'IF(COUNTUNIQUEIFS(Claims!D2:D,Claims!A2:A,team,Claims!B2:B,tileId,' +
-    'Claims!D2:D,"<>")>=needed,' +
-    'IF(points="",1,points),0))))))),"")'
-  );
-  sh.getRange('D5').setFormula(
-    '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
-    'tileIds,UNIQUE(FILTER(Items!A2:A,Items!A2:A<>"")),' +
-    'required,MAP(tileIds,LAMBDA(tileId,LET(value,' +
-    'INDEX(FILTER(Items!F2:F,Items!A2:A=tileId),1),IF(value="",1,value)))),' +
-    'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,required,LAMBDA(tileId,needed,' +
-    'IF(COUNTUNIQUEIFS(Claims!D2:D,Claims!A2:A,team,Claims!B2:B,tileId,' +
-    'Claims!D2:D,"<>")<needed,1,0))))))),"")'
-  );
-  sh.getRange('E5').setFormula(
-    '=IFERROR(LET(teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
-    'tileIds,UNIQUE(FILTER(Items!A2:A,Items!A2:A<>"")),' +
-    'tilePoints,MAP(tileIds,LAMBDA(tileId,INDEX(FILTER(Items!E2:E,Items!A2:A=tileId),1))),' +
-    'required,MAP(tileIds,LAMBDA(tileId,LET(value,' +
-    'INDEX(FILTER(Items!F2:F,Items!A2:A=tileId),1),IF(value="",1,value)))),' +
-    'MAP(teams,LAMBDA(team,SUM(MAP(tileIds,tilePoints,required,LAMBDA(tileId,points,needed,' +
-    'IF(COUNTUNIQUEIFS(Claims!D2:D,Claims!A2:A,team,Claims!B2:B,tileId,' +
-    'Claims!D2:D,"<>")<needed,' +
-    'IF(points="",1,points),0))))))),"")'
-  );
+  sh.getRange('A5').setFormula('=IFERROR(' + TEAMS + ',"")');
+  // Completed and Remaining Tiles are the same count either side of the threshold, as are
+  // Points and Remaining Points. Building each pair from one expression is what keeps them
+  // adding up to the whole board after someone edits the definition of "done".
+  sh.getRange('B5').setFormula(tileCountFormula('>='));
+  sh.getRange('C5').setFormula(tilePointsFormula('>='));
+  sh.getRange('D5').setFormula(tileCountFormula('<'));
+  sh.getRange('E5').setFormula(tilePointsFormula('<'));
 
   // The backend refuses board and claim requests while any Claims row fails validation, but
   // the organizer is looking at this tab, not an HTTP response. Surface the same check here,
@@ -1328,18 +1384,14 @@ function setupLeaderboard(sh) {
     '=IFERROR(UNIQUE(FILTER({Items!A2:A,Items!B2:B,Items!E2:E,Items!F2:F},' +
     'Items!A2:A<>"")),"")'
   );
-  sh.getRange('E25').setFormula(
-    '=IFERROR(TRANSPOSE(SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>"")))),"")'
-  );
+  sh.getRange('E25').setFormula('=IFERROR(TRANSPOSE(' + TEAMS + '),"")');
   sh.getRange('E26').setFormula(
-    '=IFERROR(LET(tileIds,UNIQUE(FILTER(Items!A2:A,Items!A2:A<>"")),' +
-    'required,MAP(tileIds,LAMBDA(tileId,LET(value,' +
-    'INDEX(FILTER(Items!F2:F,Items!A2:A=tileId),1),IF(value="",1,value)))),' +
-    'teams,SORT(UNIQUE(FILTER(Teams!B2:B,Teams!B2:B<>""))),' +
+    '=IFERROR(LET(tileIds,' + TILE_IDS + ',' +
+    'required,' + REQUIRED + ',' +
+    'teams,' + TEAMS + ',' +
     'MAKEARRAY(ROWS(tileIds),ROWS(teams),LAMBDA(rowIndex,columnIndex,' +
     'LET(team,INDEX(teams,columnIndex,1),tileId,INDEX(tileIds,rowIndex,1),' +
-    'needed,INDEX(required,rowIndex,1),progress,COUNTUNIQUEIFS(Claims!D2:D,' +
-    'Claims!A2:A,team,Claims!B2:B,tileId,Claims!D2:D,"<>"),' +
+    'needed,INDEX(required,rowIndex,1),progress,' + PROGRESS + ',' +
     'claimedBy,IF(progress>=needed,INDEX(FILTER(Claims!F2:F,Claims!A2:A=team,' +
     'Claims!B2:B=tileId),needed),""),winningItem,IF(progress>=needed,' +
     'INDEX(FILTER(Claims!E2:E,Claims!A2:A=team,Claims!B2:B=tileId),needed),""),' +
