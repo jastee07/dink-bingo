@@ -182,6 +182,34 @@ class BingoPanelTest {
         assertFalse(status.toLowerCase().contains("delivered"), status);
     }
 
+    /**
+     * The panel is a singleton that outlives a plugin restart, so the test line and its
+     * cooldown must not carry into the next run: a line reading "Sent to Dink at 3:42"
+     * describes a run that has ended, and an inherited cooldown starts the new run with a dead
+     * button and nothing on screen to explain it.
+     */
+    @Test
+    void restartingForgetsTheLastDinkTest() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        panel.setClock(Clock.fixed(Instant.parse("2026-09-15T14:32:00Z"), ZoneOffset.UTC));
+        AtomicInteger sent = new AtomicInteger();
+        panel.setTestHandler(sent::incrementAndGet);
+
+        assertTrue(invokeSendTest(panel));
+        assertTrue(panel.testStatusText().contains("Sent to Dink"), panel.testStatusText());
+
+        panel.resetTestStatus();
+        flush();
+        assertEquals("", panel.testStatusText());
+
+        // The cooldown went with it: the clock has not moved, so an inherited one would still
+        // be refusing here.
+        assertTrue(invokeSendTest(panel), "the new run inherited the previous run's cooldown");
+        assertEquals(2, sent.get());
+    }
+
     /** One stray double-click should not put two tests in an organizer's channel. */
     @Test
     void repeatedDinkTestsAreRateLimitedUntilTheCooldownElapses() throws Exception {

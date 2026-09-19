@@ -535,6 +535,25 @@ public class BingoPanel extends PluginPanel {
         return testStatusLabel.isVisible() ? testStatusLabel.getText() : "";
     }
 
+    /**
+     * Forget the last Dink test, for shutdown. Safe to call from any thread.
+     * <p>
+     * The panel outlives a plugin restart, so a line still reading "Sent to Dink at 3:42"
+     * would be describing a run that has ended -- the same reason the freshness line and the
+     * readiness report are cleared. The cooldown goes with it: it exists so a mistaken double
+     * press cannot put two messages in an organizer's channel, and restarting the plugin is
+     * not a mistaken double press. Leaving it would start the new run with a dead button and
+     * nothing on screen to explain it.
+     */
+    public void resetTestStatus() {
+        SwingUtilities.invokeLater(() -> {
+            lastTestAt = null;
+            testStatusLabel.setText("");
+            testStatusLabel.setVisible(false);
+            testButton.setEnabled(true);
+        });
+    }
+
     // ------------------------------------------------------------------
     // system check
     // ------------------------------------------------------------------

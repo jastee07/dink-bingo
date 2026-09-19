@@ -199,11 +199,12 @@ public class BingoPlugin extends Plugin {
         detector.setClaimUnresolvedListener(itemName -> {
         });
         detector.reset();
-        // The panel outlives a plugin restart, so a timestamp left behind would describe a
-        // board from the previous run, and a readiness summary left behind would describe a
-        // run that has ended.
+        // The panel outlives a plugin restart, so anything it still shows would be describing
+        // a run that has ended: when the board last loaded, how ready the setup was, and when
+        // a Dink test was last handed over.
         panel.resetFreshness();
         panel.resetSystemCheck();
+        panel.resetTestStatus();
     }
 
     // ------------------------------------------------------------------
@@ -259,8 +260,20 @@ public class BingoPlugin extends Plugin {
         fetchState = SystemStatus.Fetch.CHECKING;
         panel.markRefreshing();
         publishSystemStatus();
-        bingoClient.fetchBoard(rsn).whenComplete((result, error) ->
-            finishRefresh(key, result, error));
+        try {
+            bingoClient.fetchBoard(rsn).whenComplete((result, error) ->
+                finishRefresh(key, result, error));
+        } catch (RuntimeException e) {
+            // The client is expected to surface every failure as a completed future, but the
+            // in-flight key must not depend on that. A throw here would leave the key set with
+            // nothing left to clear it, and every later refresh -- the timer, Refresh, a
+            // login, a config change -- would see a fetch still outstanding and coalesce into
+            // a pending flag that nothing ever fires. The board would silently stop updating
+            // for the rest of the session. BingoDetector guards its own in-flight marker the
+            // same way and for the same reason.
+            log.warn("Bingo board fetch was not submitted", e);
+            finishRefresh(key, null, e);
+        }
     }
 
     private void finishRefresh(RefreshKey key, BoardResult result, Throwable error) {

@@ -110,6 +110,33 @@ class BingoPluginLifecycleTest {
     }
 
     /**
+     * A board fetch that fails by throwing rather than by completing its future must still
+     * release the in-flight marker.
+     * <p>
+     * The marker is what coalesces concurrent refreshes, so a throw that left it set would
+     * make every later refresh -- the timer, the Refresh button, a login, a config change --
+     * decide a fetch was already outstanding and do nothing. The board would stop updating
+     * for the rest of the session with nothing on screen to say so.
+     */
+    @Test
+    void aFetchThatThrowsDoesNotWedgeEveryLaterRefresh() throws Exception {
+        when(bingoClient.fetchBoard("Jake"))
+            .thenThrow(new IllegalStateException("client blew up"))
+            .thenReturn(CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+
+        plugin.startUp();
+
+        // The throw was reported as a failed round trip rather than swallowed.
+        verify(panel, atLeastOnce()).renderLoadError();
+
+        // The next refresh must actually reach the client instead of coalescing into a
+        // pending flag behind a marker nothing will clear.
+        plugin.refreshBoard();
+        verify(bingoClient, times(2)).fetchBoard("Jake");
+        verify(panel, atLeastOnce()).markRefreshSucceeded();
+    }
+
+    /**
      * A new backend or token is a different event with a different board. A search or filter
      * left over from the old one would quietly present the new board as half empty.
      */
