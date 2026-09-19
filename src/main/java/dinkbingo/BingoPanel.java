@@ -25,6 +25,7 @@ import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
+import javax.swing.plaf.basic.BasicHTML;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Dimension;
@@ -871,8 +872,8 @@ public class BingoPanel extends PluginPanel {
 
         SwingUtil.fastRemoveAll(itemsPanel);
 
-        headerLabel.setText(staleReason == null
-            ? board.getTeam() : board.getTeam() + " \u2014 not live");
+        headerLabel.setText(boardText(staleReason == null
+            ? board.getTeam() : board.getTeam() + " \u2014 not live"));
         if (staleReason == null) {
             statusLabel.setForeground(LIVE_STATUS_COLOR);
             statusLabel.setText(board.getRemainingCount() + " of " + board.getTiles().size()
@@ -1128,10 +1129,10 @@ public class BingoPanel extends PluginPanel {
         if (tile.isClaimed()) {
             String winner = tile.getClaimedItem() != null ? tile.getClaimedItem().getName() : null;
             name = smallLabel(struckThrough(tile.getName()), CLAIMED_COLOR);
-            name.setToolTipText("Claimed by " + tile.getClaimedBy() +
-                (winner == null ? "" : " with " + winner));
+            name.setToolTipText(boardText("Claimed by " + tile.getClaimedBy() +
+                (winner == null ? "" : " with " + winner)));
         } else {
-            name = smallLabel(tile.getName(), OPEN_COLOR);
+            name = smallLabel(boardText(tile.getName()), OPEN_COLOR);
             StringJoiner credited = new StringJoiner(", ");
             for (BingoContribution contribution : tile.getClaimedItems()) {
                 credited.add(contribution.getName());
@@ -1140,14 +1141,14 @@ public class BingoPanel extends PluginPanel {
             for (BingoItem option : tile.getOptions()) {
                 if (!creditedItems.containsKey(option.getId())) missing.add(option.getName());
             }
-            name.setToolTipText((tile.getClaimedItems().isEmpty() ? "" :
-                "Credited: " + credited + ". ") + "Still eligible: " + missing);
+            name.setToolTipText(boardText((tile.getClaimedItems().isEmpty() ? "" :
+                "Credited: " + credited + ". ") + "Still eligible: " + missing));
         }
         row.add(name, BorderLayout.CENTER);
 
         if (tile.isClaimed() && tile.getClaimedBy() != null) {
-            row.add(smallLabel(tile.getClaimedBy(), ColorScheme.PROGRESS_COMPLETE_COLOR),
-                BorderLayout.EAST);
+            row.add(smallLabel(boardText(tile.getClaimedBy()),
+                ColorScheme.PROGRESS_COMPLETE_COLOR), BorderLayout.EAST);
         } else {
             addProgressLabel(row, tile, null);
         }
@@ -1159,8 +1160,8 @@ public class BingoPanel extends PluginPanel {
         JPanel row = itemRowPanel();
         row.add(itemIcon(option), BorderLayout.WEST);
 
-        JLabel name = smallLabel(option.getName(), OPEN_COLOR);
-        name.setToolTipText("Eligible for " + tile.getName());
+        JLabel name = smallLabel(boardText(option.getName()), OPEN_COLOR);
+        name.setToolTipText(boardText("Eligible for " + tile.getName()));
         row.add(name, BorderLayout.CENTER);
 
         addProgressLabel(row, tile, tile.getName());
@@ -1199,7 +1200,7 @@ public class BingoPanel extends PluginPanel {
         }
         JLabel progress = smallLabel(tile.getProgress() + "/" + tile.getRequired(),
             ColorScheme.PROGRESS_INPROGRESS_COLOR);
-        progress.setToolTipText(tooltip);
+        progress.setToolTipText(tooltip == null ? null : boardText(tooltip));
         row.add(progress, BorderLayout.EAST);
     }
 
@@ -1225,14 +1226,14 @@ public class BingoPanel extends PluginPanel {
             ? credited.getClaimedBy() : tile.getClaimedBy();
 
         JLabel name = smallLabel(struckThrough(credited.getName()), CLAIMED_COLOR);
-        name.setToolTipText((tile.isClaimed()
+        name.setToolTipText(boardText((tile.isClaimed()
             ? "Completed " + tile.getName()
             : "Already counted toward " + tile.getName())
-            + (claimedBy == null ? "" : " by " + claimedBy));
+            + (claimedBy == null ? "" : " by " + claimedBy)));
         row.add(name, BorderLayout.CENTER);
 
         if (claimedBy != null) {
-            row.add(smallLabel(claimedBy, ColorScheme.PROGRESS_COMPLETE_COLOR),
+            row.add(smallLabel(boardText(claimedBy), ColorScheme.PROGRESS_COMPLETE_COLOR),
                 BorderLayout.EAST);
         }
 
@@ -1312,6 +1313,29 @@ public class BingoPanel extends PluginPanel {
     /** Strikethrough via HTML is the only way to get it on a plain JLabel. */
     private static String struckThrough(String text) {
         return "<html><s>" + escape(text) + "</s></html>";
+    }
+
+    /**
+     * Text from the board, made safe to hand straight to a label or a tooltip.
+     * <p>
+     * Swing renders a string as HTML when it starts with {@code <html>}, and a tile name, item
+     * name, team, or player name is whatever the organizer's sheet says -- or whatever a
+     * backend the player does not control chose to return. Left alone, such a value can render
+     * as markup, and Swing's HTML supports {@code <img src>}, so the board could make the
+     * client fetch a URL of the backend's choosing. {@link BingoErrors} already keeps backend
+     * error text from leading a label for this reason; these are the same strings from the
+     * same source.
+     * <p>
+     * Only a leading {@code <html>} switches the mode, so ordinary text is returned untouched
+     * and keeps a plain label's ellipsis truncation. A value that would switch it is escaped
+     * into an HTML label instead, which renders it literally.
+     */
+    private static String boardText(@Nullable String text) {
+        if (text == null) {
+            return "";
+        }
+        // The predicate Swing itself uses, rather than a second copy of it that could drift.
+        return BasicHTML.isHTMLString(text) ? "<html>" + escape(text) + "</html>" : text;
     }
 
     private static String escape(String text) {

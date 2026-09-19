@@ -464,6 +464,92 @@ class BingoPanelTest {
      * Swing owns these components on the EDT, so the read happens there; the caller is
      * responsible for having waited out the render first.
      */
+    /**
+     * Swing renders a label or tooltip as HTML when its text starts with {@code <html>}, and
+     * every name on a board row is whatever the organizer's sheet says or whatever backend the
+     * player pasted a URL for chose to return. Swing's HTML supports {@code <img src>}, so a
+     * value that reaches a label unchanged lets the board make the client fetch a URL it
+     * picked. BingoErrors already refuses to let backend error text lead a label; these are
+     * the same strings from the same place.
+     */
+    @Test
+    void boardSuppliedNamesCannotBecomeSwingMarkup() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+
+        String beacon = "<html><img src='http://tracker.invalid/x.png'>";
+        BingoItem option = new BingoItem(4151, beacon);
+        BingoTile open = new BingoTile("open", beacon, 1, 2, 1,
+            Collections.singletonList(option), Collections.emptyList(),
+            false, null, null, null);
+        BingoTile done = new BingoTile("done", "Finished", 1, 1, 1,
+            Collections.singletonList(new BingoItem(4152, "Whip")),
+            Collections.emptyList(), true, beacon, null, new BingoItem(4152, "Whip"));
+
+        BingoBoard board = new BingoBoard(beacon, java.util.Arrays.asList(open, done), true);
+        render(panel, board, BoardView.NAMED_TILES, false);
+
+        for (String name : rowNames(panel)) {
+            assertNoRawMarkup(name);
+        }
+        for (String tip : rowTooltips(panel)) {
+            assertNoRawMarkup(tip);
+        }
+        assertNoRawMarkup(headerText(panel));
+
+        // The item view puts the option name itself in the leading position.
+        render(panel, board, BoardView.POSSIBLE_ITEMS, false);
+        for (String name : rowNames(panel)) {
+            assertNoRawMarkup(name);
+        }
+        for (String tip : rowTooltips(panel)) {
+            assertNoRawMarkup(tip);
+        }
+    }
+
+    /**
+     * Either the text is not HTML at all, or it is an HTML label whose body is escaped. What
+     * must never appear is the board's own tag surviving into a string Swing will parse.
+     */
+    private static void assertNoRawMarkup(String text) {
+        if (text == null || !text.regionMatches(true, 0, "<html>", 0, 6)) {
+            return;
+        }
+        assertFalse(text.substring(6).toLowerCase(java.util.Locale.ROOT).contains("<img"),
+            "board text reached Swing as live markup: " + text);
+    }
+
+    private static String headerText(BingoPanel panel) throws Exception {
+        String[] text = new String[1];
+        onEdt(() -> {
+            JPanel header = (JPanel) ((BorderLayout) panel.getLayout())
+                .getLayoutComponent(BorderLayout.NORTH);
+            JPanel titles = (JPanel) ((BorderLayout) header.getLayout())
+                .getLayoutComponent(BorderLayout.CENTER);
+            text[0] = ((javax.swing.JLabel) titles.getComponent(0)).getText();
+        });
+        return text[0];
+    }
+
+    /** Every tooltip on every row, which Swing parses as HTML on the same rule as a label. */
+    private static List<String> rowTooltips(BingoPanel panel) throws Exception {
+        List<String> tips = new ArrayList<>();
+        SwingUtilities.invokeAndWait(() -> {
+            JScrollPane scrollPane = (JScrollPane) ((BorderLayout) panel.getLayout())
+                .getLayoutComponent(BorderLayout.CENTER);
+            JPanel itemList = (JPanel) scrollPane.getViewport().getView();
+            for (Component component : itemList.getComponents()) {
+                for (Component child : ((JPanel) component).getComponents()) {
+                    if (child instanceof javax.swing.JComponent) {
+                        tips.add(((javax.swing.JComponent) child).getToolTipText());
+                    }
+                }
+            }
+        });
+        return tips;
+    }
+
     private static List<String> rowNames(BingoPanel panel) throws Exception {
         List<String> names = new ArrayList<>();
         SwingUtilities.invokeAndWait(() -> {
