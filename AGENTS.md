@@ -18,8 +18,18 @@ the normal Dink configuration and capture behavior.
 - `BingoDetector.java`: canonicalization, board matching, and in-flight/resolved dedupe.
 - `BingoClient.java`: Apps Script board/claim HTTP client and retry behavior.
 - `BingoAnnouncer.java`: Dink external-plugin payload; this is the screenshot/Discord boundary.
-- `BingoPanel.java`: sidebar board and refresh control.
+- `BingoPanel.java`: sidebar board, refresh control, the local search/filter/sort strip, and
+  the readiness report view.
+- `SystemCheck.java`, `SystemStatus.java`, `BackendUrlState.java`: the pre-event readiness
+  report. `SystemStatus` is an immutable snapshot of what the plugin already knows and
+  `SystemCheck` turns it into rows; both are pure and free of Swing. Read-only by
+  construction: `SystemStatus` carries no URL or token, so no row can put either on screen.
+- `BoardFilter.java`, `BoardProgressFilter.java`, `BoardSort.java`: how the sidebar narrows and
+  orders the rows. A view over the immutable board only; nothing here may affect claim
+  eligibility or backend state.
 - `BingoConfig.java`: user-facing connection, detection, and announcement settings.
+- `BingoErrors.java`: the one mapping from a backend `error` value to player-facing wording,
+  shared by the sidebar and the claim chat line so the two cannot drift.
 - `BingoResponses.java`, `BingoBoard.java`, `BingoItem.java`, `BoardResult.java`: wire and view models.
 - `src/test/java/dinkbingo/`: focused JUnit/Mockito tests plus the side-loaded client main.
 - `backend/Code.gs`: Apps Script backend and spreadsheet schema.
@@ -32,13 +42,29 @@ the normal Dink configuration and capture behavior.
 message contract, but it is a separate project. Do not edit it unless the task explicitly
 requires a Dink change.
 
+## Branches
+
+`develop` is the integration branch. Open pull requests against it, not against `main`.
+
+`main` is reserved as the release branch and takes merges from `develop`, never directly from a
+feature branch. Do not retarget a pull request at `main` without being asked to.
+
+CI runs on every pull request whatever its base, and on pushes to both `main` and `develop`, so
+work that lands on the integration branch is still covered.
+
 ## Safe workflow
 
-Run from the repository root:
+There are two test suites and CI runs both, so run both from the repository root:
 
 ```bash
-./gradlew test
+./gradlew test          # the Java plugin
+node backend/Code.test.js   # the Apps Script backend
 ```
+
+The backend suite needs no network and no deployment: it loads `backend/Code.gs` into a Node
+`vm` context with the Apps Script services stubbed out. Nothing in it touches a real
+spreadsheet. A change to `Code.gs` is not verified by `./gradlew test`, which does not read
+that file at all.
 
 The Gradle wrapper stays on 8.x. Gradle 9 requires a JVM of 17 or later to run, and the
 Plugin Hub builds this plugin on Java 11, so a 9.x wrapper cannot build here no matter what
@@ -70,6 +96,17 @@ Unit tests must use mocks or `MockWebServer`; they must not call a deployed Apps
 real Discord webhook. Add regression coverage for changes to claim status handling, replay
 suppression, retry identity, URL types, and the Dink payload.
 
+The sidebar's **Test Dink** button posts a non-claiming `PluginMessage("dink", "notify", ...)`
+over the same url selection and screenshot flag as a real announcement. It is the
+non-destructive way to verify the Dink handoff: it must never call the backend, never carry an
+item, tile or team, and never report delivery, because Dink acknowledges nothing.
+
+The sidebar's **System check** button reports the setup and changes nothing. It must stay a
+read: the only request it may make is the ordinary board fetch, it must never claim a tile or
+write a `Claims` or `Audit` row, and it must never display the backend URL or the event token.
+A check that could not run reports `NOT_CHECKED`; reporting it as `READY` recreates the false
+confidence the view exists to remove.
+
 Use a reversible test tile and team when manually verifying screenshot/webhook integration.
 Before making the test claim:
 
@@ -81,8 +118,8 @@ Before making the test claim:
 
 The curl examples in `backend/README.md` are not read-only except `ping` and `board`.
 Claim, replay, concurrency, and unclaim requests mutate the deployed sheet and may trigger a
-backend Discord post when `announce_from_backend=true`. Do not run them against a live event
-without explicit authorization and a reversible test tile/team.
+live event's Claims and Audit rows. Do not run them against a live event without explicit
+authorization and a reversible test tile/team.
 
 ## Invariants to preserve
 
@@ -90,9 +127,14 @@ without explicit authorization and a reversible test tile/team.
   `duplicate`, `not_on_team`, `not_on_board`, `event_closed`, or errors. A replay returned
   to the original in-flight client operation is announced because the earlier HTTP response was
   lost and therefore never reached Dink.
-- Reuse the same `claimId` across retries.
+- Reuse the same `claimId` across retries. One `claimId` names one logical operation, and its
+  outcome must not change between attempts: accepted contributions replay from `Claims`,
+  terminal rejections from `Attempts`.
 - Keep Apps Script mutations under `LockService.getScriptLock()`.
-- Never store event tokens, admin tokens, webhook URLs, or account hashes in Claims or Audit.
+- Never store event tokens, admin tokens, webhook URLs, or account hashes in Claims, Attempts,
+  or Audit.
+- Never call `UrlFetchApp` from the backend. Announcements belong to the client, which is the
+  only side that can screenshot the drop.
 - Canonicalize item IDs before matching.
 - Preserve the raw RuneLite loot-event paths and per-item dedupe; Dink's own loot thresholds
   must not control bingo detection.
@@ -101,7 +143,13 @@ without explicit authorization and a reversible test tile/team.
 
 ## Verification expectations
 
-For ordinary Java changes, run `./gradlew test`. For integration changes, also side-load the
-client and claim a reversible test tile with a test webhook. A successful unit test proves
-the payload is posted to RuneLite's event bus; only the manual claim proves Dink accepted it,
-captured an image, and Discord received the multipart webhook.
+For ordinary Java changes, run `./gradlew test`. For anything in `backend/`, run
+`node backend/Code.test.js`; the two suites share no code and neither covers the other. For
+integration changes, also side-load the client and claim a reversible test tile with a test
+webhook. A successful unit test proves the payload is posted to RuneLite's event bus; only
+the manual claim proves Dink accepted it, captured an image, and Discord received the
+multipart webhook.
+
+The backend's leaderboard assertions run `setupLeaderboard` against a recording sheet and
+read the formulas back, so they hold however a formula is assembled. Assert on what an
+organizer would get, not on the source text of `Code.gs`.
