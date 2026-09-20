@@ -206,6 +206,13 @@ function handleClaim(body) {
     // than being treated as a fresh attempt.
     if (body.claimId) {
       var prior = claims.byClaimId[body.claimId];
+      // Claims takes precedence over Attempts, but either record names one player/item.
+      var priorAttempt = attempts && attempts[body.claimId];
+      var recorded = prior || priorAttempt;
+      if (recorded && (normalizeRsn(recorded.rsn) !== rsn || recorded.itemId !== itemId)) {
+        auditLocked(rsn, itemId, 'bad_request', body, 'claim_id reused for a different rsn or item');
+        return json({ status: 'error', error: 'claim_id_conflict' });
+      }
       if (prior) {
         var replayTile = catalog.byTileId[tileMapKey(prior.tileId)];
         var replayState = getClaimState(claims, prior.team, prior.tileId);
@@ -224,15 +231,7 @@ function handleClaim(body) {
       // Accepted claims take precedence: Claims is the authoritative record and a row there
       // means the contribution really happened. Only if nothing was accepted does a recorded
       // terminal rejection replay.
-      var priorAttempt = attempts && attempts[body.claimId];
       if (priorAttempt) {
-        // A claim id names one operation. Reusing it for a different player or item is a
-        // client bug or a forged request, and replaying the stored answer would report
-        // someone else's outcome, so fail closed instead.
-        if (priorAttempt.rsn !== rsn || priorAttempt.itemId !== itemId) {
-          auditLocked(rsn, itemId, 'bad_request', body, 'claim_id reused for a different rsn or item');
-          return json({ status: 'error', error: 'claim_id_conflict' });
-        }
         // Deliberately no announcement and no new Audit row: this outcome was already
         // decided and recorded, and the client does not announce a rejection anyway.
         return json(attemptReplay(priorAttempt, claims, catalog));
@@ -264,23 +263,16 @@ function handleClaim(body) {
     var item = findOption(tile, itemId);
 
     var state = getClaimState(claims, team, tile.id);
-    if (tileComplete(tile, state)) {
-      return rejectClaim(attempts, body, {
-        status: 'duplicate', rsn: rsn, team: team, itemId: itemId,
-        tileId: tile.id, tileName: tile.name, itemName: item.name, complete: true,
-        notes: 'tile already complete',
-        response: duplicateResult('tile_complete', team, tile,
-          state.contributions[tile.required - 1], state, claims, catalog)
-      });
-    }
-
-    var existing = state.byItemId[itemId];
+    var alreadyComplete = tileComplete(tile, state);
+    var existing = alreadyComplete ?
+      state.contributions[tile.required - 1] : state.byItemId[itemId];
     if (existing) {
       return rejectClaim(attempts, body, {
         status: 'duplicate', rsn: rsn, team: team, itemId: itemId,
-        tileId: tile.id, tileName: tile.name, itemName: item.name, complete: false,
-        notes: 'item already contributed by ' + existing.rsn,
-        response: duplicateResult('item_recorded', team, tile, existing, state, claims, catalog)
+        tileId: tile.id, tileName: tile.name, itemName: item.name, complete: alreadyComplete,
+        notes: alreadyComplete ? 'tile already complete' : 'item already contributed by ' + existing.rsn,
+        response: duplicateResult(alreadyComplete ? 'tile_complete' : 'item_recorded',
+          team, tile, existing, state, claims, catalog)
       });
     }
 
@@ -556,7 +548,7 @@ function readClaims(catalog) {
   var columns = requireColumns(values[0], SHEET_CLAIMS,
     ['team', 'tile_id', 'tile_name', 'item_id', 'item_name', 'rsn', 'claimed_at',
       'claim_id', 'source', 'progress_after', 'completed_tile']);
-  var claims = { rows: [], byClaimId: {}, byTile: {} };
+  var claims = { byClaimId: Object.create(null), byTile: {} };
   for (var r = 1; r < values.length; r++) {
     var team = String(values[r][columns.team] || '').trim();
     var tileId = String(values[r][columns.tile_id] || '').trim();
@@ -605,7 +597,8 @@ function readAttempts() {
   var columns = headerMap(values[0] || []);
   if (columns.claim_id == null || columns.status == null) return null;
 
-  var byClaimId = {};
+  // Claim IDs are caller-controlled keys, including names such as "constructor".
+  var byClaimId = Object.create(null);
   for (var r = 1; r < values.length; r++) {
     var claimId = String(values[r][columns.claim_id] || '').trim();
     // First write wins. Two genuinely simultaneous retries can each append a row before
@@ -755,7 +748,6 @@ function addContribution(claims, contribution) {
   }
   state.contributions.push(contribution);
   state.byItemId[contribution.itemId] = contribution;
-  claims.rows.push(contribution);
   if (contribution.claimId) claims.byClaimId[contribution.claimId] = contribution;
   return state;
 }

@@ -1288,4 +1288,39 @@ sheets.Attempts = ledgerRows;
 sheets.Claims = claimsBeforeLedger;
 sheets.Teams = teamsBeforeLedger;
 
+// Accepted and rejected operations use the same identity rules, including RSN aliases.
+const reviewSnapshot = JSON.parse(JSON.stringify(sheets));
+try {
+  sheets.Teams = [["rsn", "team"], ["Jake_Steele", "Team One"]];
+  sheets.Items = [sheets.Items[0], ["whip", "Whip", 4151, "Abyssal whip", 1, 1, ""]];
+  for (const claimId of ["ordinary-id", "constructor", "toString", "__proto__"]) {
+    for (const itemId of [4151, 995]) {
+      sheets.Claims = [reviewSnapshot.Claims[0]];
+      sheets.Attempts = [reviewSnapshot.Attempts[0]];
+      const request = { token: "participant-secret", rsn: "Jake_Steele", itemId, claimId };
+      const expected = itemId === 4151 ? "claimed" : "not_on_board";
+      assert.strictEqual(output(context.handleClaim(request)).status, expected);
+      const rowCounts = [sheets.Claims.length, sheets.Attempts.length, sheets.Audit.length];
+      const replay = output(context.handleClaim({ ...request, rsn: "jake steele" }));
+      assert.strictEqual(replay.status, expected);
+      assert.strictEqual(replay.replay, true);
+      assert.deepStrictEqual(
+        [sheets.Claims.length, sheets.Attempts.length, sheets.Audit.length], rowCounts,
+        "replay must not append any rows"
+      );
+      for (const change of [{ rsn: "Another player" }, { itemId: 11832 }]) {
+        assert.strictEqual(
+          output(context.handleClaim({ ...request, ...change })).error, "claim_id_conflict",
+          "both ledgers must reject reuse for another operation"
+        );
+      }
+      assert.strictEqual(sheets.Claims.length, rowCounts[0]);
+      assert.strictEqual(sheets.Attempts.length, rowCounts[1]);
+      assert.strictEqual(lockDepth, 0);
+    }
+  }
+} finally {
+  Object.assign(sheets, reviewSnapshot);
+}
+
 console.log("Apps Script grouped-tile and security tests passed");

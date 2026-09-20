@@ -249,7 +249,8 @@ use **End sessions** in RuneScape account settings.
    awards the tile's points, and sends a completion screenshot post.
 4. A later unused option returns `duplicate` because the tile is complete.
 5. Interrupt a response after the Sheet commits → the same `claimId` replay returns the
-   original result and the running client sends one Dink request.
+   original result and the running client sends one Dink request. Reusing that ID for a
+   different player or item must return `claim_id_conflict` instead.
 6. Admin unclaim one item → progress decreases; unclaim without `item_id` → all contributions
    are removed and the tile fully reopens after refresh.
 

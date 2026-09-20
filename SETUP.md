@@ -301,7 +301,7 @@ for it, which is faster than matching a symptom below. The table stays as the re
 | Contribution credited to the wrong team | Use item-level or whole-tile admin unclaim above, then fix the `Teams` tab. |
 | Chat says "your event token was rejected" | The plugin's **Event Token** does not match `token` on the `Config` tab. The drop was not recorded; ask the organizer to reclaim it once the token is fixed. |
 | Chat says "the backend stayed busy" | Every retry hit the script lock. Rare outside a heavy drop burst; tell the organizer if it repeats. |
-| Chat says "that claim id was already used" | One claim id was reused for a different drop. The backend refuses to replay another player's outcome. Harmless once; report it if it repeats. |
+| Chat says "that claim id was already used" | One claim id was reused for a different player or item, whether the original claim succeeded or was rejected. Case and underscore/space differences in the same RSN are allowed. Report repeated conflicts. |
 | Chat says "couldn't reach the backend" | No response arrived at all, so nothing was recorded. The same item is submitted again if you get another. |
 | Panel says "Backend error: Claims row N ..." | A `Claims` row credits a tile or item that `Items` no longer lists, usually a manual edit or a mid-event rename. The `Leaderboard` tab's **Claims integrity** cell shows the same thing. Restore the tile/option in `Items`, or remove the row with admin unclaim. Board loads and claims both fail until it is fixed. |
 

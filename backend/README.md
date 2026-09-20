@@ -123,7 +123,8 @@ answer is stable, and stores operational fields only — never a token.
 `Claims` still wins: an accepted contribution replays from its own row, because a row there
 means the contribution really happened. Only when nothing was accepted does the ledger apply.
 Reusing one claim id for a different RSN or item id returns `claim_id_conflict` rather than
-replaying somebody else's outcome. A replayed rejection writes no `Claims` row, adds no
+replaying somebody else's outcome. This check applies to both accepted and rejected claims;
+RSNs use the same case and underscore/space normalization as the roster. A replayed rejection writes no `Claims` row, adds no
 `Audit` row, and is never announced.
 
 A new drop of the same item gets a new claim id, so it is evaluated against current state as
