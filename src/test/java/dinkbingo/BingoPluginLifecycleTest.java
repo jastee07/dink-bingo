@@ -413,6 +413,59 @@ class BingoPluginLifecycleTest {
         verify(panel, times(1)).markRefreshSucceeded();
     }
 
+    /**
+     * A hop does not apply the fetch already in flight: the generation moved on when the next
+     * refresh found nobody logged in. Once that response is dropped, the report has to leave
+     * CHECKING, because nothing is fetching anymore.
+     */
+    @Test
+    void aDroppedRefreshWhileLoggedOutDoesNotStayChecking() throws Exception {
+        CompletableFuture<BoardResult> pending = new CompletableFuture<>();
+        when(bingoClient.fetchBoard("Jake")).thenReturn(pending);
+
+        plugin.startUp();
+        assertEquals(SystemStatus.Fetch.CHECKING, lastStatus().getFetch());
+
+        when(client.getGameState()).thenReturn(GameState.HOPPING);
+        plugin.refreshBoard();
+        pending.complete(BoardResult.of(board("Stale Team")));
+
+        assertEquals(SystemStatus.Fetch.NOT_CHECKED, lastStatus().getFetch());
+        verify(panel, never()).render(any(), anyBoolean(), any(), anyBoolean());
+        verify(detector, never()).setBoard(any());
+        verify(bingoClient, times(1)).fetchBoard("Jake");
+    }
+
+    /**
+     * The same drop after a board has loaded restores the verdict that board earned. The late
+     * response is not a new refusal, and it must not keep the report on CHECKING either.
+     */
+    @Test
+    void aDroppedRefreshKeepsTheVerdictTheBoardAlreadyEarned() throws Exception {
+        CompletableFuture<BoardResult> pending = new CompletableFuture<>();
+        BingoBoard loaded = board("Current Team");
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(loaded)),
+            pending);
+
+        plugin.startUp();
+        assertEquals(SystemStatus.Fetch.LOADED, lastStatus().getFetch());
+
+        plugin.refreshBoard();
+        assertEquals(SystemStatus.Fetch.CHECKING, lastStatus().getFetch());
+        // Still logged in, so this coalesces behind the fetch above and is run when it ends.
+        plugin.refreshBoard();
+        when(client.getGameState()).thenReturn(GameState.HOPPING);
+        pending.complete(BoardResult.rejected("bad_token"));
+
+        assertEquals(SystemStatus.Fetch.LOADED, lastStatus().getFetch());
+        assertNull(lastStatus().getBackendError());
+        verify(bingoClient, times(2)).fetchBoard("Jake");
+        verify(panel, times(1)).markRefreshSucceeded();
+        verify(detector, never()).setDetectionEnabled(false);
+        verify(panel, never()).renderStale(any(), anyBoolean(), any(), anyBoolean(), anyString());
+    }
+
     @Test
     void aCompletionAfterShutdownRecordsNothing() throws Exception {
         CompletableFuture<BoardResult> pending = new CompletableFuture<>();

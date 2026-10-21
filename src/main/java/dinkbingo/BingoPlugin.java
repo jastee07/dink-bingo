@@ -124,6 +124,15 @@ public class BingoPlugin extends Plugin {
      */
     private volatile SystemStatus.Fetch fetchState = SystemStatus.Fetch.NOT_CHECKED;
 
+    /**
+     * The verdict {@link #fetchState} held before the in-flight check replaced it with
+     * {@code CHECKING}. A response that will not be applied has nothing newer to report, and
+     * the readiness view would otherwise stay on {@code CHECKING} after that fetch is gone.
+     * <p>
+     * Read and written under {@link #refreshStateLock}.
+     */
+    private SystemStatus.Fetch fetchStateBeforeCheck = SystemStatus.Fetch.NOT_CHECKED;
+
     /** The backend's raw reason for the last refusal, or null. */
     @Nullable
     private volatile String lastBackendError;
@@ -255,9 +264,14 @@ public class BingoPlugin extends Plugin {
             }
             key = new RefreshKey(lifecycle, refreshGeneration.get());
             inFlight = key;
+            // A follow-up that starts while a dropped check is still marked CHECKING must
+            // restore the verdict that check replaced, not CHECKING itself.
+            if (fetchState != SystemStatus.Fetch.CHECKING) {
+                fetchStateBeforeCheck = fetchState;
+            }
+            fetchState = SystemStatus.Fetch.CHECKING;
         }
 
-        fetchState = SystemStatus.Fetch.CHECKING;
         panel.markRefreshing();
         publishSystemStatus();
         try {
@@ -277,18 +291,29 @@ public class BingoPlugin extends Plugin {
     }
 
     private void finishRefresh(RefreshKey key, BoardResult result, Throwable error) {
-        boolean rerun;
+        boolean followUp;
+        boolean apply;
+        boolean restored = false;
         synchronized (refreshStateLock) {
             if (!key.equals(inFlight)) {
                 return;
             }
             inFlight = null;
-            rerun = refreshPending;
+            followUp = refreshPending && active;
             refreshPending = false;
+            long lifecycle = key.getLifecycle();
+            apply = isCurrent(lifecycle) && key.getRefresh() == refreshGeneration.get();
+            // The response belongs to a refresh that was superseded, or to a run that has
+            // ended. Nothing is in flight anymore, so CHECKING would describe a fetch that
+            // is not running. A follow-up, when there is one, marks CHECKING again once it
+            // actually starts.
+            if (!apply && fetchState == SystemStatus.Fetch.CHECKING) {
+                fetchState = fetchStateBeforeCheck;
+                restored = true;
+            }
         }
 
-        long lifecycle = key.getLifecycle();
-        if (isCurrent(lifecycle) && key.getRefresh() == refreshGeneration.get()) {
+        if (apply) {
             if (error == null && result != null && result.isSuccess()) {
                 BingoBoard board = result.getBoard();
                 currentBoard = board;
@@ -334,8 +359,10 @@ public class BingoPlugin extends Plugin {
             // After the outcome has been applied, so the report and the board can never
             // disagree about what the last fetch did.
             publishSystemStatus();
+        } else if (restored) {
+            publishSystemStatus();
         }
-        if (rerun && active) {
+        if (followUp) {
             refreshBoard();
         }
     }
@@ -419,8 +446,11 @@ public class BingoPlugin extends Plugin {
     private void forgetBoard() {
         currentBoard = BingoBoard.EMPTY;
         boardLoaded = false;
-        fetchState = SystemStatus.Fetch.NOT_CHECKED;
         lastBackendError = null;
+        synchronized (refreshStateLock) {
+            fetchState = SystemStatus.Fetch.NOT_CHECKED;
+            fetchStateBeforeCheck = SystemStatus.Fetch.NOT_CHECKED;
+        }
     }
 
     /**
