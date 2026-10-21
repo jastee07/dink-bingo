@@ -20,10 +20,16 @@ var SHEET_TEAMS = 'Teams';
 var SHEET_CLAIMS = 'Claims';
 var SHEET_AUDIT = 'Audit';
 var SHEET_CONFIG = 'Config';
+var SHEET_ATTEMPTS = 'Attempts';
 var SHEET_LEADERBOARD = 'Leaderboard';
 
 // Stay below the RuneLite HTTP client's read timeout so callers can receive retryable=true.
 var LOCK_TIMEOUT_MS = 5000;
+
+// Rejected-authentication diagnostics are bucketed by the hour and expire after six, so
+// invalid traffic cannot grow storage without bound. See noteRejectedAuth.
+var AUTH_REJECT_BUCKET_MS = 60 * 60 * 1000;
+var AUTH_REJECT_TTL_SECONDS = 6 * 60 * 60;
 
 // ---------------------------------------------------------------------------
 // Entry points
@@ -75,13 +81,15 @@ function doPost(e) {
 function handleBoard(params) {
   var cfg = readConfig();
   if (!tokenValid(cfg, params.token)) {
+    noteRejectedAuth('participant token');
     return json({ status: 'error', error: 'bad_token' });
   }
 
   var rsn = normalizeRsn(params.rsn);
-  var team = resolveTeam(rsn);
+  var member = rosterMember(requireRoster(readRoster()), rsn);
+  var team = member ? member.team : null;
   var catalog = readTiles();
-  var claims = readClaims();
+  var claims = readClaims(catalog);
 
   var out = [];
   var remaining = 0;
@@ -124,7 +132,12 @@ function handleClaim(body) {
   var cfg = readConfig();
 
   if (!tokenValid(cfg, body.token)) {
-    audit(body.rsn, body.itemId, 'bad_token', body, '');
+    // Deliberately no Audit row. The deployment must be public, so anyone who learns the
+    // /exec URL can post invalid-token claims without knowing the event token. Auditing them
+    // would let unauthenticated traffic append rows to the authoritative spreadsheet, burn
+    // write quota, and -- because audit() takes the script lock -- contend with real claims
+    // during exactly the drop burst the lock exists to serialize.
+    noteRejectedAuth('participant token');
     return json({ status: 'error', error: 'bad_token' });
   }
 
@@ -149,7 +162,7 @@ function handleClaim(body) {
   // already committed must replay rather than turn into not_on_team: the client treats
   // not_on_team as resolved, so it would stop retrying and never announce a real claim.
   var catalog = readTiles();
-  var team = resolveTeam(rsn);
+  var roster = readRoster();
 
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(LOCK_TIMEOUT_MS)) {
@@ -158,7 +171,15 @@ function handleClaim(body) {
   }
 
   try {
-    var claims = readClaims();
+    // Validated against Items: a row naming an unknown tile, or crediting an item that tile
+    // never listed, must not advance progress or award points. Fail the claim closed instead
+    // and let the organizer repair the row -- the client keeps retrying a generic error, so
+    // the claim lands once the sheet is fixed.
+    var claims = readClaims(catalog);
+    // Mutable state, so it is read here rather than hoisted above the lock with Items and
+    // Teams. The ledger holds only terminal rejections for the current event, so it stays
+    // small; the extra round trip buys a claim id whose answer cannot drift between retries.
+    var attempts = readAttempts();
 
     // Idempotency first: a retried POST must return the original outcome rather
     // than being treated as a fresh attempt.
@@ -178,21 +199,52 @@ function handleClaim(body) {
           catalog
         ));
       }
+
+      // Accepted claims take precedence: Claims is the authoritative record and a row there
+      // means the contribution really happened. Only if nothing was accepted does a recorded
+      // terminal rejection replay.
+      var priorAttempt = attempts && attempts[body.claimId];
+      if (priorAttempt) {
+        // A claim id names one operation. Reusing it for a different player or item is a
+        // client bug or a forged request, and replaying the stored answer would report
+        // someone else's outcome, so fail closed instead.
+        if (priorAttempt.rsn !== rsn || priorAttempt.itemId !== itemId) {
+          auditLocked(rsn, itemId, 'bad_request', body, 'claim_id reused for a different rsn or item');
+          return json({ status: 'error', error: 'claim_id_conflict' });
+        }
+        // Deliberately no announcement and no new Audit row: this outcome was already
+        // decided and recorded, and the client does not announce a rejection anyway.
+        return json(attemptReplay(priorAttempt, claims, catalog));
+      }
     }
 
     if (!eventOpen(cfg)) {
       auditLocked(rsn, itemId, 'event_closed', body, '');
+      recordAttempt(attempts, body.claimId, {
+        rsn: rsn, itemId: itemId, status: 'event_closed'
+      });
       return json({ status: 'event_closed' });
     }
 
+    // Past the replay check, so an ambiguous Teams tab can now fail visibly without stranding
+    // a claim the Sheet already committed.
+    var member = rosterMember(requireRoster(roster), rsn);
+    var team = member ? member.team : null;
     if (!team) {
       auditLocked(rsn, itemId, 'not_on_team', body, '');
+      recordAttempt(attempts, body.claimId, {
+        rsn: rsn, itemId: itemId, status: 'not_on_team'
+      });
       return json({ status: 'not_on_team' });
     }
 
     var tile = catalog.byItemId[itemId];
     if (!tile) {
       auditLocked(rsn, itemId, 'not_on_board', body, '');
+      recordAttempt(attempts, body.claimId, {
+        rsn: rsn, team: team, itemId: itemId, status: 'not_on_board',
+        itemName: body.itemName
+      });
       return json({ status: 'not_on_board' });
     }
     body.tileId = tile.id;
@@ -206,6 +258,10 @@ function handleClaim(body) {
         'duplicate', false, team, tile, completion, state, claims, catalog
       );
       completedDuplicate.duplicateReason = 'tile_complete';
+      recordAttempt(attempts, body.claimId, {
+        rsn: rsn, team: team, itemId: itemId, status: 'duplicate',
+        tileId: tile.id, tileName: tile.name, itemName: item.name, complete: true
+      });
       return json(completedDuplicate);
     }
 
@@ -216,6 +272,10 @@ function handleClaim(body) {
         'duplicate', false, team, tile, existing, state, claims, catalog
       );
       itemDuplicate.duplicateReason = 'item_recorded';
+      recordAttempt(attempts, body.claimId, {
+        rsn: rsn, team: team, itemId: itemId, status: 'duplicate',
+        tileId: tile.id, tileName: tile.name, itemName: item.name, complete: false
+      });
       return json(itemDuplicate);
     }
 
@@ -229,7 +289,9 @@ function handleClaim(body) {
       tileName: tile.name,
       itemId: itemId,
       itemName: item.name,
-      rsn: rsn,
+      // The organizer's spelling from Teams, not the normalized lookup key, so the sidebar
+      // and Leaderboard show "Jake_Steele" rather than "jake steele".
+      rsn: member.rsn,
       claimedAt: now,
       claimId: body.claimId || Utilities.getUuid(),
       source: body.source || '',
@@ -255,16 +317,12 @@ function handleClaim(body) {
       'team ' + team + ', tile ' + tile.id + ', progress ' + progress + '/' + tile.required);
 
     state = addContribution(claims, contribution);
-    var remaining = countRemaining(team, claims, catalog.tiles);
 
-    if (truthy(cfg.announce_from_backend) && cfg.discord_webhook) {
-      var label = item.name === tile.name ? '**' + item.name + '**' :
-        '**' + item.name + '** for **' + tile.name + '**';
-      var verb = complete ? 'completed' : 'advanced';
-      postDiscord(cfg.discord_webhook, rsn + ' ' + verb + ' ' + label + ' for ' + team +
-        ' — ' + progress + '/' + tile.required + ' items');
-    }
-
+    // Nothing here may make an outbound request. Announcements are the client's job: only the
+    // plugin can screenshot the drop, and a backend embed without one is weaker proof than no
+    // embed at all. Keeping the claim path free of UrlFetchApp also means a slow or
+    // rate-limited Discord endpoint can never extend the script lock hold and turn concurrent
+    // drops into lock_timeout retries.
     return json(claimResult(status, false, team, tile, contribution, state, claims, catalog));
   } finally {
     lock.releaseLock();
@@ -278,6 +336,7 @@ function handleClaim(body) {
 function handleUnclaim(params) {
   var cfg = readConfig();
   if (!cfg.admin_token || params.admin_token !== cfg.admin_token) {
+    noteRejectedAuth('admin token');
     return json({ status: 'error', error: 'bad_admin_token' });
   }
 
@@ -323,6 +382,9 @@ function handleUnclaim(params) {
     SpreadsheetApp.flush();
     var catalog = readTiles();
     var tile = catalog.byTileId[tileMapKey(tileId)];
+    // Deliberately unvalidated. Admin unclaim is how an organizer removes an orphaned or
+    // mistyped contribution, so it has to keep working while other Claims rows still fail
+    // validation. The requested rows are already deleted above; this only recomputes state.
     var claims = readClaims();
     var state = getClaimState(claims, team, tileId);
     auditLocked('ADMIN', requestedItemId, 'unclaimed', params,
@@ -433,7 +495,19 @@ function findOption(tile, itemId) {
   return null;
 }
 
-function readClaims() {
+/**
+ * Read Claims into per-tile contribution state.
+ *
+ * Pass the Items catalog to validate each row against it. Tile completion is decided by
+ * counting contributions, so a Claims row naming a tile that no longer exists, or crediting an
+ * item that tile never listed, would otherwise advance or complete a tile and award points.
+ * Claims is the documented correction surface, so a mistyped manual edit has to fail visibly
+ * rather than quietly change the result.
+ *
+ * Call it without a catalog only for admin cleanup, which must be able to remove exactly the
+ * rows that fail validation.
+ */
+function readClaims(catalog) {
   var values = sheet(SHEET_CLAIMS).getDataRange().getValues();
   var columns = requireColumns(values[0], SHEET_CLAIMS,
     ['team', 'tile_id', 'tile_name', 'item_id', 'item_name', 'rsn', 'claimed_at',
@@ -456,11 +530,141 @@ function readClaims() {
       claimId: String(values[r][columns.claim_id] || ''),
       source: String(values[r][columns.source] || ''),
       progressAfter: parseInt(values[r][columns.progress_after], 10) || 1,
-      completedTile: truthy(values[r][columns.completed_tile])
+      completedTile: truthy(values[r][columns.completed_tile]),
+      row: r + 1
     };
+    if (catalog) validateContribution(catalog, contribution);
     addContribution(claims, contribution);
   }
   return claims;
+}
+
+/**
+ * Read the terminal-rejection ledger, keyed by claim id.
+ *
+ * Accepted contributions are their own idempotency record: a retried claimId finds its row in
+ * Claims and replays. Terminal *rejections* went only to Audit, which is not consulted, so a
+ * retry after a lost HTTP response was re-evaluated against whatever the state had become. A
+ * drop rejected just before event_start could be accepted by its own retry a moment later; a
+ * drop evaluated before event_end could come back event_closed; a Teams or Items edit between
+ * attempts could flip not_on_team or not_on_board either way. A claimId is supposed to name
+ * one logical operation whose answer is stable.
+ *
+ * Returns null when the tab is absent, which is how a deployment that has not re-run
+ * setupSheet behaves. Claims keep working with the old semantics rather than every claim
+ * failing mid-event on a missing tab; backend/README.md makes creating it an upgrade step.
+ */
+function readAttempts() {
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_ATTEMPTS);
+  if (!sh) return null;
+  var values = sh.getDataRange().getValues();
+  var columns = headerMap(values[0] || []);
+  if (columns.claim_id == null || columns.status == null) return null;
+
+  var byClaimId = {};
+  for (var r = 1; r < values.length; r++) {
+    var claimId = String(values[r][columns.claim_id] || '').trim();
+    // First write wins. Two genuinely simultaneous retries can each append a row before
+    // either reads the other; they agree on the outcome, so the earlier row is authoritative.
+    if (!claimId || byClaimId[claimId]) continue;
+    byClaimId[claimId] = {
+      claimId: claimId,
+      rsn: String(values[r][columns.rsn] || '').trim(),
+      team: String(values[r][columns.team] || '').trim(),
+      itemId: parseInt(values[r][columns.item_id], 10),
+      status: String(values[r][columns.status] || '').trim(),
+      tileId: String(values[r][columns.tile_id] || '').trim(),
+      tileName: String(values[r][columns.tile_name] || ''),
+      itemName: String(values[r][columns.item_name] || ''),
+      complete: truthy(values[r][columns.complete])
+    };
+  }
+  return byClaimId;
+}
+
+/**
+ * Record a terminal rejection so its claim id replays the same answer.
+ *
+ * Never store the event token, admin token, or any other Config value here; the ledger holds
+ * only the operational fields needed to reproduce the original response.
+ */
+function recordAttempt(attempts, claimId, fields) {
+  if (attempts === null || !claimId || attempts[claimId]) return;
+  try {
+    sheet(SHEET_ATTEMPTS).appendRow([
+      claimId,
+      fields.rsn || '',
+      fields.team || '',
+      fields.itemId == null ? '' : fields.itemId,
+      fields.status,
+      fields.tileId || '',
+      fields.tileName || '',
+      fields.itemName || '',
+      !!fields.complete,
+      new Date()
+    ]);
+    attempts[claimId] = {
+      claimId: claimId,
+      rsn: fields.rsn || '',
+      team: fields.team || '',
+      itemId: fields.itemId,
+      status: fields.status,
+      tileId: fields.tileId || '',
+      tileName: fields.tileName || '',
+      itemName: fields.itemName || '',
+      complete: !!fields.complete
+    };
+  } catch (err) {
+    // A claim that was correctly decided must not fail because its ledger row could not be
+    // written. The cost is that this one claim id can still drift on a later retry.
+    console.error('attempt ledger write failed: ' + err);
+  }
+}
+
+/** Rebuild the original terminal response from its ledger row. */
+function attemptReplay(attempt, claims, catalog) {
+  var replayed = {
+    status: attempt.status,
+    replay: true,
+    team: attempt.team || null,
+    tileId: attempt.tileId || null,
+    tileName: attempt.tileName || null,
+    itemId: attempt.itemId,
+    itemName: attempt.itemName || null,
+    points: 0,
+    complete: attempt.complete
+  };
+  // Board totals are cheap to recompute and are the only fields whose freshness helps the
+  // player, so they reflect the board now rather than at the time of the rejection.
+  if (attempt.team) {
+    replayed.remaining = countRemaining(attempt.team, claims, catalog.tiles);
+    replayed.total = catalog.tiles.length;
+  }
+  return replayed;
+}
+
+/**
+ * Check one Claims row against the current Items catalog.
+ *
+ * Only ids are authoritative. tile_name and item_name are historical display text and are
+ * expected to differ after an organizer renames a tile or item, so they are not compared.
+ */
+function validateContribution(catalog, contribution) {
+  var tile = catalog.byTileId[tileMapKey(contribution.tileId)];
+  if (!tile) {
+    throw new Error('Claims row ' + contribution.row + ' credits tile_id "' +
+      contribution.tileId + '", which is not in Items; restore the tile or remove the row');
+  }
+  if (!findOption(tile, contribution.itemId)) {
+    throw new Error('Claims row ' + contribution.row + ' credits item_id ' +
+      contribution.itemId + ' to tile_id "' + contribution.tileId +
+      '", which does not list that item as an option');
+  }
+}
+
+/** Identify a Claims row in an error when the contribution came from the sheet. */
+function claimsRowRef(contribution) {
+  return contribution.row ? ' (Claims row ' + contribution.row + ')' : '';
 }
 
 function addContribution(claims, contribution) {
@@ -472,10 +676,12 @@ function addContribution(claims, contribution) {
   }
   if (state.byItemId[contribution.itemId]) {
     throw new Error('multiple Claims rows for team ' + contribution.team +
-      ', tile_id ' + contribution.tileId + ', item_id ' + contribution.itemId);
+      ', tile_id ' + contribution.tileId + ', item_id ' + contribution.itemId +
+      claimsRowRef(contribution));
   }
   if (contribution.claimId && claims.byClaimId[contribution.claimId]) {
-    throw new Error('claim_id appears more than once: ' + contribution.claimId);
+    throw new Error('claim_id appears more than once: ' + contribution.claimId +
+      claimsRowRef(contribution));
   }
   state.contributions.push(contribution);
   state.byItemId[contribution.itemId] = contribution;
@@ -573,16 +779,107 @@ function requireColumns(headers, sheetName, required) {
   return columns;
 }
 
-function resolveTeam(rsn) {
-  if (!rsn) return null;
+/**
+ * Read Teams into a validated lookup keyed by normalized RuneScape name.
+ *
+ * The previous implementation rescanned the tab for every request and returned the first row
+ * whose normalized name matched, so `Jake_Steele` on one team and `jake steele` on another
+ * silently resolved to whichever appeared first. Items already fails visibly on ambiguous
+ * configuration; Teams is just as load-bearing and now does the same.
+ *
+ * Validation problems are returned rather than thrown so the caller decides when they matter.
+ * A claim the Sheet already committed must still replay even if the organizer has since
+ * introduced a bad Teams row, for the same reason the not_on_team check sits behind the
+ * claimId replay check: the client treats a rejection as resolved and would stop retrying.
+ */
+function readRoster() {
+  var roster = { byRsn: {}, error: null };
   var values = sheet(SHEET_TEAMS).getDataRange().getValues();
-  for (var r = 1; r < values.length; r++) {
-    if (normalizeRsn(values[r][0]) === rsn) {
-      var team = String(values[r][1] || '').trim();
-      return team || null;
-    }
+  var columns = headerMap(values[0] || []);
+  if (columns.rsn == null || columns.team == null) {
+    roster.error = SHEET_TEAMS + ' is missing the rsn or team column';
+    return roster;
   }
-  return null;
+
+  for (var r = 1; r < values.length; r++) {
+    var row = r + 1;
+    var rawRsn = String(values[r][columns.rsn] || '').trim();
+    var team = String(values[r][columns.team] || '').trim();
+
+    // A fully blank row is ordinary spreadsheet padding, not a configuration mistake.
+    if (!rawRsn && !team) continue;
+
+    if (!rawRsn) {
+      roster.error = SHEET_TEAMS + ' row ' + row + ' assigns a team with no rsn';
+      return roster;
+    }
+    if (!team) {
+      // Without this a half-filled row is indistinguishable from an unlisted player, so the
+      // player is told they are not on a team and the organizer never learns which row is bad.
+      roster.error = SHEET_TEAMS + ' row ' + row + ' has rsn "' + rawRsn + '" with no team';
+      return roster;
+    }
+
+    var key = normalizeRsn(rawRsn);
+    if (!key) {
+      roster.error = SHEET_TEAMS + ' row ' + row + ' has an unusable rsn';
+      return roster;
+    }
+    var existing = roster.byRsn[key];
+    if (existing) {
+      roster.error = SHEET_TEAMS + ' rows ' + existing.row + ' and ' + row +
+        ' are the same RuneScape name ("' + existing.rsn + '" and "' + rawRsn +
+        '"); names are case-insensitive and treat _ and space as equivalent';
+      return roster;
+    }
+
+    // Keep the organizer's spelling for display. Normalized names are lookup keys only.
+    roster.byRsn[key] = { rsn: rawRsn, team: team, row: row };
+  }
+  return roster;
+}
+
+/** Raise a deferred Teams validation failure at the point the roster is actually needed. */
+function requireRoster(roster) {
+  if (roster.error) throw new Error(roster.error);
+  return roster;
+}
+
+function rosterMember(roster, rsn) {
+  return rsn ? roster.byRsn[rsn] || null : null;
+}
+
+/**
+ * Count a rejected authentication attempt without touching the spreadsheet.
+ *
+ * The web app is deployed with "Anyone" access because players authenticate with the event
+ * token in the request body, not with a Google account. That means unauthenticated traffic is
+ * always reachable, so any per-attempt spreadsheet write is an amplifier: it grows the
+ * authoritative sheet, consumes Apps Script write quota, and contends for the script lock.
+ *
+ * Cache entries expire on their own and are keyed by a coarse time bucket, so this records at
+ * most a handful of values regardless of how much invalid traffic arrives. The attempted
+ * token, the request body, and the caller are deliberately never recorded.
+ */
+function noteRejectedAuth(kind) {
+  try {
+    var cache = CacheService.getScriptCache();
+    if (!cache) return;
+    var bucket = Math.floor(new Date().getTime() / AUTH_REJECT_BUCKET_MS);
+    var key = 'auth_reject_' + kind.replace(/[^a-z]+/gi, '_') + '_' + bucket;
+    var count = parseInt(cache.get(key), 10);
+    count = isNaN(count) ? 1 : count + 1;
+    cache.put(key, String(count), AUTH_REJECT_TTL_SECONDS);
+    if (count === 1) {
+      // One line per kind per bucket. Logging every attempt would just move the same
+      // unbounded-growth problem from the spreadsheet into the execution log.
+      console.warn('rejected an invalid ' + kind +
+        '; further attempts in this window are counted, not logged');
+    }
+  } catch (err) {
+    // Diagnostics must never break or slow a request.
+    console.error('auth rejection counter unavailable');
+  }
 }
 
 function audit(rsn, itemId, result, payload, notes) {
@@ -642,7 +939,11 @@ function sanitizeAuditPayload(payload) {
 /** RuneScape names treat underscore and space as equivalent and are case-insensitive. */
 function normalizeRsn(rsn) {
   if (rsn == null) return null;
-  var s = String(rsn).trim().replace(/[ _]/g, ' ').toLowerCase();
+  // RuneScape names are case-insensitive, treat underscore and space as equivalent, and
+  // never contain consecutive or edge separators. Collapsing runs and re-trimming afterwards
+  // means "Jake__Steele" and "jake steele" are recognised as one player, not two. The
+  // class keeps the non-breaking space a spreadsheet paste can introduce.
+  var s = String(rsn).replace(/[  _]+/g, ' ').trim().toLowerCase();
   return s || null;
 }
 
@@ -703,20 +1004,6 @@ function json(obj) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-function postDiscord(webhook, content) {
-  try {
-    UrlFetchApp.fetch(webhook, {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify({ content: content }),
-      muteHttpExceptions: true
-    });
-  } catch (err) {
-    // Fetch failures can include the requested URL; never copy a webhook into logs.
-    console.error('discord post failed');
-  }
-}
-
 // ---------------------------------------------------------------------------
 // one-time setup
 // ---------------------------------------------------------------------------
@@ -734,6 +1021,10 @@ function setupSheet() {
     'source', 'progress_after', 'completed_tile'
   ];
   tabs[SHEET_AUDIT] = ['ts', 'rsn', 'item_id', 'result', 'notes', 'raw_payload', 'tile_id'];
+  tabs[SHEET_ATTEMPTS] = [
+    'claim_id', 'rsn', 'team', 'item_id', 'status', 'tile_id', 'tile_name', 'item_name',
+    'complete', 'recorded_at'
+  ];
   tabs[SHEET_CONFIG] = ['key', 'value'];
 
   for (var name in tabs) {
@@ -750,10 +1041,8 @@ function setupSheet() {
   if (cfg.getLastRow() <= 1) {
     cfg.appendRow(['token', Utilities.getUuid()]);
     cfg.appendRow(['admin_token', Utilities.getUuid()]);
-    cfg.appendRow(['discord_webhook', '']);
     cfg.appendRow(['event_start', '']);
     cfg.appendRow(['event_end', '']);
-    cfg.appendRow(['announce_from_backend', 'false']);
   }
 
   var items = ss.getSheetByName(SHEET_ITEMS);
@@ -864,6 +1153,23 @@ function upgradeGroupedTiles() {
       auditSheet.getRange(1, auditValues[0].length + 1).setValue('tile_id');
     }
 
+    // Terminal-rejection ledger. Without it a retry after a lost response is re-evaluated
+    // against current state and can return a different answer for the same claim id.
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var attempts = ss.getSheetByName(SHEET_ATTEMPTS);
+    if (!attempts) attempts = ss.insertSheet(SHEET_ATTEMPTS);
+    if (attempts.getLastRow() === 0) {
+      var attemptHeaders = [
+        'claim_id', 'rsn', 'team', 'item_id', 'status', 'tile_id', 'tile_name', 'item_name',
+        'complete', 'recorded_at'
+      ];
+      attempts.appendRow(attemptHeaders);
+      attempts.setFrozenRows(1);
+      attempts.getRange(1, 1, 1, attemptHeaders.length).setFontWeight('bold');
+    }
+    // tile_id is a text identifier even when it looks like a number, as on Items and Claims.
+    attempts.getRange('F:F').setNumberFormat('@');
+
     SpreadsheetApp.flush();
     setupLeaderboard(sheet(SHEET_LEADERBOARD));
   } finally {
@@ -871,6 +1177,7 @@ function upgradeGroupedTiles() {
   }
 
   SpreadsheetApp.getUi().alert(
+    'The Attempts ledger is ready. ' +
     'Grouped-tile threshold columns were added and existing rows remain one-of-one tiles. ' +
     'Assign the same tile_id, tile_name, points, and required_count to alternative Items rows, ' +
     'then deploy a new version.'
@@ -1003,6 +1310,18 @@ function setupLeaderboard(sh) {
     'IF(points="",1,points),0))))))),"")'
   );
 
+  // The backend refuses board and claim requests while any Claims row fails validation, but
+  // the organizer is looking at this tab, not an HTTP response. Surface the same check here,
+  // pointing at the repair. Ids are authoritative; renamed display text is not a problem.
+  sh.getRange('G4').setValue('Claims integrity');
+  sh.getRange('G5').setFormula(
+    '=IFERROR(LET(invalid,SUMPRODUCT((Claims!A2:A<>"")*' +
+    '(COUNTIFS(Items!A2:A,Claims!B2:B,Items!C2:C,Claims!D2:D)=0)),' +
+    'IF(invalid=0,"OK — every contribution matches an Items option",' +
+    'invalid&" Claims row(s) credit a tile/item pair that is not in Items. ' +
+    'Board and claim requests fail until they are corrected.")),"")'
+  );
+
   sh.getRange('A25:CV1000').clearContent();
   sh.getRange('A25:D25').setValues([['Tile ID', 'Tile', 'Points', 'Required']]);
   sh.getRange('A26').setFormula(
@@ -1031,6 +1350,8 @@ function setupLeaderboard(sh) {
   sh.getRange('A1').setFontSize(16).setFontWeight('bold');
   sh.getRange('A2').setFontColor('#5f6368');
   sh.getRange('A4:E4').setBackground('#f1f3f4').setFontWeight('bold');
+  sh.getRange('G4').setBackground('#f1f3f4').setFontWeight('bold');
+  sh.setColumnWidth(7, 420);
   sh.getRange('A25:CV25').setBackground('#f1f3f4').setFontWeight('bold');
   sh.getRange('B5:E24').setNumberFormat('0');
   sh.setColumnWidth(1, 90);
@@ -1047,5 +1368,11 @@ function setupLeaderboard(sh) {
     .setFontColor('#274e13')
     .setRanges([sh.getRange('E26:CV1000')])
     .build();
-  sh.setConditionalFormatRules([claimedRule]);
+  var integrityRule = SpreadsheetApp.newConditionalFormatRule()
+    .whenTextDoesNotContain('OK —')
+    .setBackground('#fce8e6')
+    .setFontColor('#a50e0e')
+    .setRanges([sh.getRange('G5')])
+    .build();
+  sh.setConditionalFormatRules([claimedRule, integrityRule]);
 }

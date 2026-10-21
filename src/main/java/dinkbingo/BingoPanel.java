@@ -13,19 +13,34 @@ import javax.inject.Singleton;
 import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
+import javax.swing.JComboBox;
+import javax.swing.JComponent;
 import javax.swing.JLabel;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
+import javax.swing.JTextField;
 import javax.swing.ScrollPaneConstants;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.FormatStyle;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.StringJoiner;
 
@@ -37,14 +52,52 @@ public class BingoPanel extends PluginPanel {
 
     private static final Color CLAIMED_COLOR = new Color(0x7A, 0x7A, 0x7A);
     private static final Color OPEN_COLOR = Color.WHITE;
+    private static final Color STALE_COLOR = new Color(0xDB, 0x6E, 0x6E);
+    private static final Color LIVE_STATUS_COLOR = ColorScheme.LIGHT_GRAY_COLOR;
 
-    /** Keeps an unrecognized backend reason from pushing the sidebar out of shape. */
-    private static final int MAX_REASON_LENGTH = 80;
 
     private final ItemManager itemManager;
 
     private final JLabel headerLabel = new JLabel();
     private final JLabel statusLabel = new JLabel();
+    private final JLabel freshnessLabel = new JLabel();
+
+    /**
+     * How current the rows on screen are.
+     * <p>
+     * Owned by the panel rather than recomputed per render, so re-drawing for an unrelated
+     * reason -- switching board view, toggling hidden tiles -- cannot make a board look
+     * freshly fetched when nothing was fetched.
+     */
+    private volatile Freshness freshness = Freshness.UNKNOWN;
+
+    /** When the last lifecycle-current board actually arrived; null until one has. */
+    @Nullable
+    private volatile Instant lastSuccess;
+
+    /** Non-null only while the backend has explicitly refused a refresh. */
+    @Nullable
+    private volatile String staleReason;
+
+    /**
+     * Whether the tile rows are on screen at all. A loading or error screen has no rows, so
+     * there is nothing for a freshness line to describe.
+     */
+    private volatile boolean showingBoard;
+
+    /** Overridden in tests so the rendered time does not depend on the wall clock. */
+    private Clock clock = Clock.systemDefaultZone();
+
+    /**
+     * Built once. The label is re-rendered on every refresh, so formatting must not allocate a
+     * formatter each time, and the player's own locale and zone decide how the time reads.
+     */
+    private final DateTimeFormatter timeFormat = DateTimeFormatter
+        .ofLocalizedTime(FormatStyle.SHORT)
+        .withLocale(Locale.getDefault())
+        .withZone(ZoneId.systemDefault());
+
+    private enum Freshness { UNKNOWN, REFRESHING, UPDATED, FAILED, REJECTED }
     private final JPanel itemsPanel = new JPanel();
     private final JScrollPane itemsScrollPane = new JScrollPane(
         itemsPanel,
@@ -52,9 +105,56 @@ public class BingoPanel extends PluginPanel {
         ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
     );
     private final JButton refreshButton = new JButton("Refresh");
+    private final JButton testButton = new JButton("Test Dink");
+    private final JLabel testStatusLabel = new JLabel();
+
+    /**
+     * Local view controls. They narrow and reorder what is on screen and nothing else: a tile
+     * hidden here is still claimed normally when it drops, and no control reaches the backend.
+     */
+    private final JTextField searchField = new JTextField();
+    private final JComboBox<BoardProgressFilter> progressCombo =
+        new JComboBox<>(BoardProgressFilter.values());
+    private final JComboBox<BoardSort> sortCombo = new JComboBox<>(BoardSort.values());
+    private final JCheckBox eligibleOnlyBox = new JCheckBox("Only what can still be claimed");
+    private final JButton clearFiltersButton = new JButton("Clear filters");
+    private final JButton filtersToggle = new JButton();
+    private final JPanel filterControls = new JPanel();
+    private final JPanel filterBar = new JPanel(new BorderLayout());
+
+    /**
+     * Set while the filters are being reset programmatically, so clearing four controls
+     * redraws the board once at the end rather than four times on the way there.
+     */
+    private boolean adjustingFilters;
+
+    /**
+     * The last board handed to {@link #render}, so changing a filter can redraw the rows
+     * without a fetch. EDT-owned, like the controls that read it.
+     */
+    private BingoBoard lastBoard = BingoBoard.EMPTY;
+    private boolean lastConfigured;
+    private BoardView lastBoardView = BoardView.NAMED_TILES;
+    private boolean lastHideCompletedTiles;
+
+    /** Why the list is empty, or "" when it is not. EDT-owned. */
+    private String emptyState = "";
 
     private Runnable refreshHandler = () -> {
     };
+
+    private Runnable testHandler = () -> {
+    };
+
+    /**
+     * Long enough that a mistaken double press cannot put two messages in an organizer's
+     * channel, short enough to re-test straight after fixing a setting.
+     */
+    private static final Duration TEST_COOLDOWN = Duration.ofSeconds(30);
+
+    /** When the last test was handed to Dink; null until one has been. EDT-owned. */
+    @Nullable
+    private Instant lastTestAt;
 
     @Inject
     BingoPanel(ItemManager itemManager) {
@@ -72,19 +172,41 @@ public class BingoPanel extends PluginPanel {
         headerLabel.setFont(FontManager.getRunescapeBoldFont());
         headerLabel.setForeground(Color.WHITE);
         statusLabel.setFont(FontManager.getRunescapeSmallFont());
-        statusLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+        statusLabel.setForeground(LIVE_STATUS_COLOR);
 
         JPanel titles = new JPanel();
         titles.setLayout(new BoxLayout(titles, BoxLayout.Y_AXIS));
         titles.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        freshnessLabel.setFont(FontManager.getRunescapeSmallFont());
+        freshnessLabel.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+        freshnessLabel.setVisible(false);
+
         titles.add(headerLabel);
         titles.add(statusLabel);
+        titles.add(freshnessLabel);
 
         refreshButton.setFocusPainted(false);
         refreshButton.addActionListener(e -> refreshHandler.run());
 
+        testButton.setFocusPainted(false);
+        testButton.setFont(FontManager.getRunescapeSmallFont());
+        testButton.setToolTipText("Post a test notification to Dink. Claims nothing and "
+            + "changes no tile.");
+        testButton.addActionListener(e -> confirmAndSendTest());
+
+        testStatusLabel.setFont(FontManager.getRunescapeSmallFont());
+        testStatusLabel.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+        testStatusLabel.setVisible(false);
+
         header.add(titles, BorderLayout.CENTER);
         header.add(refreshButton, BorderLayout.EAST);
+        header.add(buildFilterBar(), BorderLayout.SOUTH);
+
+        JPanel footer = new JPanel(new BorderLayout(0, 4));
+        footer.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        footer.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
+        footer.add(testButton, BorderLayout.NORTH);
+        footer.add(testStatusLabel, BorderLayout.CENTER);
 
         itemsPanel.setLayout(new GridBagLayout());
         itemsPanel.setBackground(ColorScheme.DARK_GRAY_COLOR);
@@ -95,10 +217,246 @@ public class BingoPanel extends PluginPanel {
 
         add(header, BorderLayout.NORTH);
         add(itemsScrollPane, BorderLayout.CENTER);
+        add(footer, BorderLayout.SOUTH);
     }
 
     public void setRefreshHandler(Runnable handler) {
         this.refreshHandler = handler;
+    }
+
+    public void setTestHandler(Runnable handler) {
+        this.testHandler = handler;
+    }
+
+    /**
+     * The search, filter, and sort strip that sits under the team summary.
+     * <p>
+     * Collapsed by default and one line tall when it is. The summary and Refresh button are
+     * the two things a player needs during a drop, so the controls are not allowed to push
+     * them off the top of a narrow sidebar just by existing.
+     */
+    private JPanel buildFilterBar() {
+        filterBar.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        filterBar.setBorder(BorderFactory.createEmptyBorder(6, 0, 0, 0));
+
+        filtersToggle.setFocusPainted(false);
+        filtersToggle.setFont(FontManager.getRunescapeSmallFont());
+        filtersToggle.setToolTipText("Search, filter, and sort the rows below. "
+            + "Nothing here changes what can be claimed.");
+        filtersToggle.addActionListener(e -> setFiltersExpanded(!filterControls.isVisible()));
+
+        searchField.setFont(FontManager.getRunescapeSmallFont());
+        searchField.setToolTipText("Matches tile names and item names");
+        searchField.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent e) {
+                onFilterChanged();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent e) {
+                onFilterChanged();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent e) {
+                onFilterChanged();
+            }
+        });
+
+        progressCombo.setFont(FontManager.getRunescapeSmallFont());
+        progressCombo.setToolTipText("Show every tile, or only the ones at this stage");
+        progressCombo.addActionListener(e -> onFilterChanged());
+
+        sortCombo.setFont(FontManager.getRunescapeSmallFont());
+        sortCombo.setToolTipText("Reorders the rows on screen. The board itself is unchanged");
+        sortCombo.addActionListener(e -> onFilterChanged());
+
+        eligibleOnlyBox.setFont(FontManager.getRunescapeSmallFont());
+        eligibleOnlyBox.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        eligibleOnlyBox.setForeground(OPEN_COLOR);
+        eligibleOnlyBox.setToolTipText("Hide completed tiles and items already credited");
+        // An item listener rather than an action listener, so clearing the box in code
+        // redraws the board the same way a click does.
+        eligibleOnlyBox.addItemListener(e -> onFilterChanged());
+
+        clearFiltersButton.setFocusPainted(false);
+        clearFiltersButton.setFont(FontManager.getRunescapeSmallFont());
+        clearFiltersButton.setEnabled(false);
+        clearFiltersButton.addActionListener(e -> clearFiltersOnEdt());
+
+        filterControls.setLayout(new BoxLayout(filterControls, BoxLayout.Y_AXIS));
+        filterControls.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        filterControls.setBorder(BorderFactory.createEmptyBorder(6, 0, 0, 0));
+        filterControls.add(labelled("Search", searchField));
+        filterControls.add(labelled("Show", progressCombo));
+        filterControls.add(labelled("Sort", sortCombo));
+        filterControls.add(eligibleOnlyBox);
+        filterControls.add(clearFiltersButton);
+        filterControls.setVisible(false);
+
+        filterBar.add(filtersToggle, BorderLayout.NORTH);
+        filterBar.add(filterControls, BorderLayout.CENTER);
+        updateFiltersToggle();
+        return filterBar;
+    }
+
+    private static JPanel labelled(String text, JComponent control) {
+        JPanel row = new JPanel(new BorderLayout(6, 0));
+        row.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        row.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
+        JLabel label = new JLabel(text);
+        label.setFont(FontManager.getRunescapeSmallFont());
+        label.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+        row.add(label, BorderLayout.WEST);
+        row.add(control, BorderLayout.CENTER);
+        return row;
+    }
+
+    private void setFiltersExpanded(boolean expanded) {
+        filterControls.setVisible(expanded);
+        updateFiltersToggle();
+        filterBar.revalidate();
+        filterBar.repaint();
+    }
+
+    /**
+     * Says whether anything is filtering the list even while the controls are folded away, so
+     * a short board is never mistaken for a board with nothing left on it.
+     */
+    private void updateFiltersToggle() {
+        filtersToggle.setText((filterControls.isVisible() ? "\u25BE Filters" : "\u25B8 Filters")
+            + (currentFilter().isActive() ? " \u2014 on" : ""));
+    }
+
+    /** The filter strip exactly as a player reads it. */
+    String filtersToggleText() {
+        return filtersToggle.getText();
+    }
+
+    /** The controls as they currently stand. */
+    BoardFilter currentFilter() {
+        return new BoardFilter(
+            searchField.getText(),
+            (BoardProgressFilter) progressCombo.getSelectedItem(),
+            (BoardSort) sortCombo.getSelectedItem(),
+            eligibleOnlyBox.isSelected());
+    }
+
+    /**
+     * Redraw the rows for a control change.
+     * <p>
+     * Deliberately reuses the last board rather than asking for a fetch: filtering is a view
+     * over the snapshot already on screen, and it must not restamp how fresh that snapshot is.
+     * A message screen is left alone, because there are no rows to filter.
+     */
+    private void onFilterChanged() {
+        if (adjustingFilters) {
+            return;
+        }
+        updateFiltersToggle();
+        clearFiltersButton.setEnabled(currentFilter().isActive());
+        if (showingBoard) {
+            renderOnEdt(lastBoard, lastConfigured, lastBoardView, lastHideCompletedTiles);
+        }
+    }
+
+    /**
+     * Drop every filter back to its default. Safe to call from any thread.
+     * <p>
+     * Used when the event itself changes. A search for a tile that only existed on the old
+     * board would otherwise present the new one as empty.
+     */
+    public void clearFilters() {
+        SwingUtilities.invokeLater(this::clearFiltersOnEdt);
+    }
+
+    private void clearFiltersOnEdt() {
+        adjustingFilters = true;
+        try {
+            searchField.setText("");
+            progressCombo.setSelectedItem(BoardProgressFilter.ALL);
+            sortCombo.setSelectedItem(BoardSort.BOARD_ORDER);
+            eligibleOnlyBox.setSelected(false);
+        } finally {
+            adjustingFilters = false;
+        }
+        onFilterChanged();
+    }
+
+    /** Test seams. Swing controls belong to the EDT, so call these from it. */
+    void setSearch(String text) {
+        searchField.setText(text);
+    }
+
+    void setProgressFilter(BoardProgressFilter progress) {
+        progressCombo.setSelectedItem(progress);
+    }
+
+    void setSort(BoardSort sort) {
+        sortCombo.setSelectedItem(sort);
+    }
+
+    void setEligibleOnly(boolean eligibleOnly) {
+        eligibleOnlyBox.setSelected(eligibleOnly);
+    }
+
+    /** Why the list is empty as a player reads it; "" when rows are on screen. */
+    String emptyStateText() {
+        return emptyState;
+    }
+
+    /**
+     * Asks before posting, because the message lands in whatever channel the event uses and
+     * nobody else can tell a stray test from a mistake.
+     */
+    private void confirmAndSendTest() {
+        int choice = JOptionPane.showConfirmDialog(
+            this,
+            "Post a test notification to Dink?\n\n"
+                + "It claims nothing and changes no tile, but it does appear in the Discord "
+                + "channel your webhook points at.",
+            "Test Dink notification",
+            JOptionPane.OK_CANCEL_OPTION,
+            JOptionPane.QUESTION_MESSAGE);
+        if (choice == JOptionPane.OK_OPTION) {
+            sendTest();
+        }
+    }
+
+    /**
+     * Hands a test to the plugin unless one was just sent. Returns whether it was sent.
+     * <p>
+     * The wording afterwards deliberately stops at "handed to Dink". Dink acknowledges
+     * nothing, so a panel that said "delivered" would be the same false confidence the test
+     * exists to remove -- the message appearing in Discord is the only confirmation.
+     */
+    boolean sendTest() {
+        Instant now = clock.instant();
+        if (lastTestAt != null && Duration.between(lastTestAt, now).compareTo(TEST_COOLDOWN) < 0) {
+            return false;
+        }
+        lastTestAt = now;
+        testButton.setEnabled(false);
+        // The width hint is what makes a long HTML label wrap instead of clipping in the
+        // fixed-width sidebar.
+        testStatusLabel.setText("<html><body style='width:100%'>Sent to Dink at "
+            + escape(timeFormat.format(now))
+            + ". Dink does not confirm delivery \u2014 check Discord.</body></html>");
+        testStatusLabel.setVisible(true);
+
+        Timer reEnable = new Timer((int) TEST_COOLDOWN.toMillis(),
+            e -> testButton.setEnabled(true));
+        reEnable.setRepeats(false);
+        reEnable.start();
+
+        testHandler.run();
+        return true;
+    }
+
+    /** The test line exactly as a player reads it; empty when no test has been sent. */
+    String testStatusText() {
+        return testStatusLabel.isVisible() ? testStatusLabel.getText() : "";
     }
 
     /** Safe to call from any thread. */
@@ -108,12 +466,83 @@ public class BingoPanel extends PluginPanel {
         BoardView boardView,
         boolean hideCompletedTiles
     ) {
+        showingBoard = configured && board.isConfigured();
+        SwingUtilities.invokeLater(() ->
+            renderOnEdt(board, configured, boardView, hideCompletedTiles));
+    }
+
+    /**
+     * A lifecycle-current board arrived. Safe to call from any thread.
+     * <p>
+     * Separate from {@link #render} on purpose: the board is also re-rendered when the player
+     * switches view or toggles hidden tiles, and stamping those as a refresh would tell them
+     * the board is current when nothing was fetched.
+     */
+    public void markRefreshSucceeded() {
+        lastSuccess = clock.instant();
+        staleReason = null;
+        freshness = Freshness.UPDATED;
+        SwingUtilities.invokeLater(this::updateFreshnessLabel);
+    }
+
+    /**
+     * A refresh is under way. Safe to call from any thread.
+     * <p>
+     * Deliberately touches only the freshness line. Blanking the rows here is what made a
+     * periodic refresh flicker the whole board, and it throws away something readable in
+     * exchange for nothing.
+     */
+    public void markRefreshing() {
+        freshness = Freshness.REFRESHING;
+        SwingUtilities.invokeLater(this::updateFreshnessLabel);
+    }
+
+    /**
+     * The round trip failed and the rows on screen are the last good board. Safe to call from
+     * any thread.
+     * <p>
+     * Distinct from a rejection: the board is probably still correct, so it keeps its last
+     * success time and claims keep being submitted.
+     */
+    public void markRefreshFailed() {
+        freshness = Freshness.FAILED;
+        SwingUtilities.invokeLater(this::updateFreshnessLabel);
+    }
+
+    /** Forget how fresh anything was, for logout, a token change, or shutdown. */
+    public void resetFreshness() {
+        lastSuccess = null;
+        staleReason = null;
+        freshness = Freshness.UNKNOWN;
+        SwingUtilities.invokeLater(this::updateFreshnessLabel);
+    }
+
+    /**
+     * Keep the last known board on screen, clearly labelled as no longer live. Safe to call
+     * from any thread.
+     * <p>
+     * Used when the backend answered and refused a refresh after an earlier one succeeded.
+     * The rows are still useful reference, but presenting them as current would hide the fact
+     * that the plugin has stopped claiming drops, which is exactly what a player needs to know
+     * when an organizer rotates the event token mid-event.
+     */
+    public void renderStale(
+        BingoBoard board,
+        boolean configured,
+        BoardView boardView,
+        boolean hideCompletedTiles,
+        @Nullable String backendError
+    ) {
+        staleReason = BingoErrors.describeBoardError(backendError);
+        freshness = Freshness.REJECTED;
+        showingBoard = configured && board.isConfigured();
         SwingUtilities.invokeLater(() ->
             renderOnEdt(board, configured, boardView, hideCompletedTiles));
     }
 
     /** Safe to call from any thread. */
     public void renderLoading() {
+        showingBoard = false;
         SwingUtilities.invokeLater(() -> renderMessage(
             "Loading board",
             "Fetching your team's tiles\u2026"
@@ -127,6 +556,7 @@ public class BingoPanel extends PluginPanel {
      * connection actually explains.
      */
     public void renderLoadError() {
+        showingBoard = false;
         SwingUtilities.invokeLater(() -> renderMessage(
             "Couldn't load board",
             "Check your connection, then press Refresh"
@@ -140,56 +570,18 @@ public class BingoPanel extends PluginPanel {
      */
     public void renderLoadError(String backendError) {
         String reason = describeBackendError(backendError);
+        showingBoard = false;
         SwingUtilities.invokeLater(() -> renderMessage("Couldn't load board", reason));
     }
 
     /**
      * Turns a backend {@code error} value into something an organizer can act on.
      * <p>
-     * An unrecognized value is a custom backend's free text, so it is never rendered raw: it is
-     * prefixed, collapsed to one line, and truncated. The prefix also keeps the reason from
-     * ever starting with {@code <html>}, which Swing would otherwise render as markup, and the
-     * untruncated value is already in the log for anyone who needs the rest of it.
+     * The wording lives in {@link BingoErrors} alongside the claim-failure phrasing for the
+     * same reason, so the two surfaces cannot drift apart.
      */
     static String describeBackendError(@Nullable String backendError) {
-        String error = backendError == null ? "" : backendError.trim();
-        switch (error) {
-            case "":
-                return "Check your connection, then press Refresh";
-            case "bad_token":
-                return "Event token rejected. Check the token on the Config tab.";
-            case "lock_timeout":
-                return "The backend is busy. Press Refresh to try again.";
-            case "bad_json":
-            case "bad_request":
-            case "post_required":
-            case "unknown_action":
-                return "The backend rejected the request. Check the Apps Script deployment.";
-            default:
-                return "Backend error: " + summarize(error);
-        }
-    }
-
-    /** Collapses a backend reason to a single bounded line. */
-    private static String summarize(String error) {
-        StringBuilder out = new StringBuilder(error.length());
-        boolean pendingSpace = false;
-        for (int i = 0; i < error.length(); i++) {
-            char c = error.charAt(i);
-            if (Character.isWhitespace(c) || Character.isISOControl(c)) {
-                pendingSpace = out.length() > 0;
-                continue;
-            }
-            if (out.length() + (pendingSpace ? 2 : 1) > MAX_REASON_LENGTH) {
-                return out.append('\u2026').toString();
-            }
-            if (pendingSpace) {
-                out.append(' ');
-                pendingSpace = false;
-            }
-            out.append(c);
-        }
-        return out.toString();
+        return BingoErrors.describeBoardError(backendError);
     }
 
     private void renderOnEdt(
@@ -198,25 +590,56 @@ public class BingoPanel extends PluginPanel {
         BoardView boardView,
         boolean hideCompletedTiles
     ) {
+        // Remembered so a filter change can redraw these same rows without a fetch.
+        lastBoard = board;
+        lastConfigured = configured;
+        lastBoardView = boardView;
+        lastHideCompletedTiles = hideCompletedTiles;
+        emptyState = "";
+
         SwingUtil.fastRemoveAll(itemsPanel);
 
         if (!configured) {
             headerLabel.setText("Not configured");
+            statusLabel.setForeground(LIVE_STATUS_COLOR);
             statusLabel.setText("Set a Backend URL in the config");
+            freshnessLabel.setVisible(false);
+            filterBar.setVisible(false);
             refreshItemsPanel();
+            renderCount++;
             return;
         }
 
         if (!board.isConfigured()) {
             headerLabel.setText("No team");
+            statusLabel.setForeground(LIVE_STATUS_COLOR);
             statusLabel.setText("Your RSN is not on the Teams tab");
+            freshnessLabel.setVisible(false);
+            filterBar.setVisible(false);
             refreshItemsPanel();
+            renderCount++;
             return;
         }
 
-        headerLabel.setText(board.getTeam());
-        statusLabel.setText(board.getRemainingCount() + " of " + board.getTiles().size() + " tiles left"
-            + (board.isEventOpen() ? "" : " (event closed)"));
+        headerLabel.setText(staleReason == null
+            ? board.getTeam() : board.getTeam() + " \u2014 not live");
+        if (staleReason == null) {
+            statusLabel.setForeground(LIVE_STATUS_COLOR);
+            statusLabel.setText(board.getRemainingCount() + " of " + board.getTiles().size()
+                + " tiles left" + (board.isEventOpen() ? "" : " (event closed)"));
+        } else {
+            statusLabel.setForeground(STALE_COLOR);
+            // The reason is bounded and single-line, and never leads, so a backend-controlled
+            // string cannot be read as Swing markup or push the tile count off screen.
+            statusLabel.setText("Not claiming drops \u2014 " + staleReason);
+        }
+        updateFreshnessLabel();
+
+        filterBar.setVisible(true);
+        updateFiltersToggle();
+        BoardFilter filter = currentFilter();
+
+        clearFiltersButton.setEnabled(filter.isActive());
 
         GridBagConstraints c = new GridBagConstraints();
         c.fill = GridBagConstraints.HORIZONTAL;
@@ -224,13 +647,20 @@ public class BingoPanel extends PluginPanel {
         c.gridy = 0;
         c.weightx = 1;
 
+        // Filtering and sorting happen over a copy. The snapshot the detector matches drops
+        // against is the same object either way, so nothing here can change what is claimable.
+        List<BingoTile> tiles = filter.apply(board);
+
         if (boardView == BoardView.POSSIBLE_ITEMS) {
-            for (BingoTile tile : board.getTiles()) {
+            for (BingoTile tile : tiles) {
                 if (tile.isClaimed()) {
                     if (hideCompletedTiles) {
                         continue;
                     }
                     for (BingoContribution credited : creditedContributions(tile)) {
+                        if (!filter.showsOption(tile, credited.getName(), true)) {
+                            continue;
+                        }
                         itemsPanel.add(buildCreditedItemRow(tile, credited), c);
                         c.gridy++;
                     }
@@ -240,18 +670,24 @@ public class BingoPanel extends PluginPanel {
                 for (BingoItem option : tile.getOptions()) {
                     BingoContribution counted = credited.get(option.getId());
                     if (counted == null) {
+                        if (!filter.showsOption(tile, option.getName(), false)) {
+                            continue;
+                        }
                         itemsPanel.add(buildItemRow(tile, option), c);
                         c.gridy++;
                     } else if (!hideCompletedTiles) {
                         // Keeping the row in place, struck through, is what tells a player
                         // their drop was credited; dropping it just reshuffles the list.
+                        if (!filter.showsOption(tile, counted.getName(), true)) {
+                            continue;
+                        }
                         itemsPanel.add(buildCreditedItemRow(tile, counted), c);
                         c.gridy++;
                     }
                 }
             }
         } else {
-            for (BingoTile tile : board.getTiles()) {
+            for (BingoTile tile : tiles) {
                 if (hideCompletedTiles && tile.isClaimed()) {
                     continue;
                 }
@@ -260,14 +696,126 @@ public class BingoPanel extends PluginPanel {
             }
         }
 
+        if (c.gridy == 0 && !board.getTiles().isEmpty()) {
+            // An empty list is otherwise indistinguishable from a board with nothing left,
+            // which is the one reading that would make a player stop hunting.
+            emptyState = emptyStateFor(filter, hideCompletedTiles);
+            if (!emptyState.isEmpty()) {
+                itemsPanel.add(buildEmptyRow(emptyState), c);
+            }
+        }
+
         refreshItemsPanel();
+        renderCount++;
+    }
+
+    private static String emptyStateFor(BoardFilter filter, boolean hideCompletedTiles) {
+        if (filter.isActive()) {
+            return "Nothing matches the filters you have set \u2014 clear them to see the "
+                + "whole board.";
+        }
+        if (hideCompletedTiles) {
+            return "Every tile is completed. Turn off Hide Completed Tiles to see them.";
+        }
+        return "";
+    }
+
+    private JPanel buildEmptyRow(String message) {
+        JPanel row = new JPanel(new BorderLayout());
+        row.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+        row.setBorder(BorderFactory.createEmptyBorder(8, 6, 8, 6));
+        // The width hint is what makes a long HTML label wrap instead of clipping in the
+        // fixed-width sidebar.
+        JLabel label = new JLabel("<html><body style='width:100%'>" + escape(message)
+            + "</body></html>");
+        label.setFont(FontManager.getRunescapeSmallFont());
+        label.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+        row.add(label, BorderLayout.CENTER);
+        return row;
     }
 
     private void renderMessage(String header, String status) {
         SwingUtil.fastRemoveAll(itemsPanel);
         headerLabel.setText(header);
+        statusLabel.setForeground(LIVE_STATUS_COLOR);
         statusLabel.setText(status);
+        // There are no rows on screen, so there is nothing for a freshness line or a filter
+        // control to act on.
+        freshnessLabel.setVisible(false);
+        filterBar.setVisible(false);
         refreshItemsPanel();
+        renderCount++;
+    }
+
+    /**
+     * Describe how current the rows are, in the player's own locale and time zone.
+     * <p>
+     * Always an absolute time rather than "just now". Nothing ticks this label, so a relative
+     * phrase would still read "just now" twenty minutes later, which is worse than no
+     * indicator at all during an event.
+     */
+    private void updateFreshnessLabel() {
+        String text = freshnessText();
+        freshnessLabel.setText(text);
+        freshnessLabel.setVisible(!text.isEmpty());
+    }
+
+    /**
+     * The freshness line exactly as a player reads it, derived from the panel's own state.
+     * <p>
+     * Deliberately not read back out of the label. Swing fields are owned by the EDT, so
+     * reading them from anywhere else sees whatever was published last, which made this
+     * untestable and would make any future caller subtly wrong.
+     */
+    String freshnessText() {
+        if (!showingBoard) {
+            return "";
+        }
+        String text;
+        switch (freshness) {
+            case REFRESHING:
+                text = "Refreshing\u2026";
+                break;
+            case UPDATED:
+                text = "Updated " + formatLastSuccess();
+                break;
+            case FAILED:
+                text = lastSuccess == null ? "Refresh failed"
+                    : "Last updated " + formatLastSuccess() + " \u2014 refresh failed";
+                break;
+            case REJECTED:
+                // The status line above already carries the reason and the warning, so this
+                // only has to say how old the rows are.
+                text = lastSuccess == null ? "" : "Last updated " + formatLastSuccess();
+                break;
+            default:
+                text = "";
+                break;
+        }
+        return text;
+    }
+
+    private String formatLastSuccess() {
+        return lastSuccess == null ? "never" : timeFormat.format(lastSuccess);
+    }
+
+    /** Test seam so a rendered time does not depend on the wall clock. */
+    void setClock(Clock clock) {
+        this.clock = clock;
+    }
+
+    private volatile int renderCount;
+
+    /**
+     * How many renders have finished. A test seam, and one the panel cannot do without.
+     * <p>
+     * {@code SwingUtil.fastRemoveAll} pumps pending events while it tears down the old rows,
+     * so a task queued behind a render can be run from inside it, with the previous board
+     * still half on screen. Counting completed renders is what lets a test wait for the rows
+     * it asked for instead of reading the ones being taken apart.
+     */
+    int renderCount() {
+        return renderCount;
     }
 
     private void refreshItemsPanel() {
