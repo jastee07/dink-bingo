@@ -46,6 +46,7 @@ class BingoPanelTest {
 
         // Nothing has loaded yet, so there is nothing to describe.
         panel.render(board, true, BoardView.NAMED_TILES, false);
+        flush();
         assertEquals("", panel.freshnessText());
 
         panel.markRefreshing();
@@ -53,6 +54,7 @@ class BingoPanelTest {
 
         panel.markRefreshSucceeded();
         panel.render(board, true, BoardView.NAMED_TILES, false);
+        flush();
         String updated = panel.freshnessText();
         assertTrue(updated.startsWith("Updated "), updated);
 
@@ -68,6 +70,7 @@ class BingoPanelTest {
         // Recovery clears the warning.
         panel.markRefreshSucceeded();
         panel.render(board, true, BoardView.NAMED_TILES, false);
+        flush();
         assertEquals(updated, panel.freshnessText());
     }
 
@@ -86,6 +89,7 @@ class BingoPanelTest {
 
         panel.markRefreshSucceeded();
         panel.render(board, true, BoardView.NAMED_TILES, false);
+        flush();
         String afterRefresh = panel.freshnessText();
 
         panel.setClock(Clock.fixed(Instant.parse("2026-09-15T18:00:00Z"), ZoneOffset.UTC));
@@ -127,6 +131,7 @@ class BingoPanelTest {
 
         panel.markRefreshSucceeded();
         panel.render(board, true, BoardView.NAMED_TILES, false);
+        flush();
         assertFalse(panel.freshnessText().isEmpty());
 
         panel.resetFreshness();
@@ -143,10 +148,23 @@ class BingoPanelTest {
 
         panel.markRefreshSucceeded();
         panel.render(board, true, BoardView.NAMED_TILES, false);
+        flush();
         assertFalse(panel.freshnessText().isEmpty());
 
         panel.renderLoading();
+        flush();
         assertEquals("", panel.freshnessText());
+
+        // The flag is updated with the message, on the event thread. A filter change that
+        // observed the previous board would paint those rows back over the error.
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        flush();
+        panel.renderLoadError("bad_token");
+        flush();
+        assertEquals("", panel.freshnessText());
+        onEdt(() -> panel.setSearch("whip"));
+        flush();
+        assertEquals("Couldn't load board", headerText(panel));
     }
 
     // ------------------------------------------------------------------

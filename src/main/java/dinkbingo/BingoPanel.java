@@ -82,8 +82,12 @@ public class BingoPanel extends PluginPanel {
     /**
      * Whether the tile rows are on screen at all. A loading or error screen has no rows, so
      * there is nothing for a freshness line to describe.
+     * <p>
+     * Touched only on the event dispatch thread, in the same method that puts the rows up or
+     * replaces them with a message. A filter change reads it there too, so the two cannot
+     * disagree about whether there is a board to redraw.
      */
-    private volatile boolean showingBoard;
+    private boolean showingBoard;
 
     /** Overridden in tests so the rendered time does not depend on the wall clock. */
     private Clock clock = Clock.systemDefaultZone();
@@ -756,7 +760,6 @@ public class BingoPanel extends PluginPanel {
         BoardView boardView,
         boolean hideCompletedTiles
     ) {
-        showingBoard = configured && board.isConfigured();
         SwingUtilities.invokeLater(() ->
             renderOnEdt(board, configured, boardView, hideCompletedTiles));
     }
@@ -825,14 +828,12 @@ public class BingoPanel extends PluginPanel {
     ) {
         staleReason = BingoErrors.describeBoardError(backendError);
         freshness = Freshness.REJECTED;
-        showingBoard = configured && board.isConfigured();
         SwingUtilities.invokeLater(() ->
             renderOnEdt(board, configured, boardView, hideCompletedTiles));
     }
 
     /** Safe to call from any thread. */
     public void renderLoading() {
-        showingBoard = false;
         SwingUtilities.invokeLater(() -> renderMessage(
             "Loading board",
             "Fetching your team's tiles\u2026"
@@ -846,7 +847,6 @@ public class BingoPanel extends PluginPanel {
      * connection actually explains.
      */
     public void renderLoadError() {
-        showingBoard = false;
         SwingUtilities.invokeLater(() -> renderMessage(
             "Couldn't load board",
             "Check your connection, then press Refresh"
@@ -862,7 +862,6 @@ public class BingoPanel extends PluginPanel {
         // The wording lives in BingoErrors alongside the claim-failure phrasing, so the
         // sidebar and the chat line cannot drift apart.
         String reason = BingoErrors.describeBoardError(backendError);
-        showingBoard = false;
         SwingUtilities.invokeLater(() -> renderMessage("Couldn't load board", reason));
     }
 
@@ -889,6 +888,8 @@ public class BingoPanel extends PluginPanel {
             return;
         }
 
+        // The rows are on screen from here, which is what a filter change on this thread consults.
+        showingBoard = true;
         SwingUtil.fastRemoveAll(itemsPanel);
 
         headerLabel.setText(boardText(staleReason == null
@@ -1055,6 +1056,8 @@ public class BingoPanel extends PluginPanel {
      * either to describe.
      */
     private void renderMessage(String header, String status) {
+        // A message screen has no rows for a filter change to redraw.
+        showingBoard = false;
         SwingUtil.fastRemoveAll(itemsPanel);
         headerLabel.setText(header);
         statusLabel.setForeground(LIVE_STATUS_COLOR);
