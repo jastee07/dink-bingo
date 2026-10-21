@@ -937,6 +937,7 @@ function noteRejectedAuth(kind) {
     if (!cache) return;
     var bucket = Math.floor(new Date().getTime() / AUTH_REJECT_BUCKET_MS);
     var key = 'auth_reject_' + kind.replace(/[^a-z]+/gi, '_') + '_' + bucket;
+    // Non-atomic get-then-put. Undercounting is acceptable (diagnostics only); do not add a lock.
     var count = parseInt(cache.get(key), 10);
     count = isNaN(count) ? 1 : count + 1;
     cache.put(key, String(count), AUTH_REJECT_TTL_SECONDS);
