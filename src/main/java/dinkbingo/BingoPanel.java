@@ -43,6 +43,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.StringJoiner;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntConsumer;
 
 /**
  * Side panel showing the team's board: which tiles are still open, and who took the rest.
@@ -201,6 +203,14 @@ public class BingoPanel extends PluginPanel {
      * {@link #renderCount()}.
      */
     private volatile int renderCount;
+
+    /**
+     * The newest screen anyone has asked for. Row removal runs events already on the queue,
+     * so a screen requested later can be painted from inside an earlier one; the earlier one
+     * then has to leave that screen alone.
+     */
+    private final AtomicInteger renderGeneration = new AtomicInteger();
+
     private volatile int checkRenderCount;
 
     @Inject
@@ -437,7 +447,8 @@ public class BingoPanel extends PluginPanel {
         updateFiltersToggle();
         clearFiltersButton.setEnabled(currentFilter().isActive());
         if (showingBoard) {
-            renderOnEdt(lastBoard, lastConfigured, lastBoardView, lastHideCompletedTiles);
+            renderOnEdt(renderGeneration.get(), lastBoard, lastConfigured, lastBoardView,
+                lastHideCompletedTiles);
         }
     }
 
@@ -760,8 +771,8 @@ public class BingoPanel extends PluginPanel {
         BoardView boardView,
         boolean hideCompletedTiles
     ) {
-        SwingUtilities.invokeLater(() ->
-            renderOnEdt(board, configured, boardView, hideCompletedTiles));
+        scheduleScreen(generation ->
+            renderOnEdt(generation, board, configured, boardView, hideCompletedTiles));
     }
 
     /**
@@ -828,13 +839,14 @@ public class BingoPanel extends PluginPanel {
     ) {
         staleReason = BingoErrors.describeBoardError(backendError);
         freshness = Freshness.REJECTED;
-        SwingUtilities.invokeLater(() ->
-            renderOnEdt(board, configured, boardView, hideCompletedTiles));
+        scheduleScreen(generation ->
+            renderOnEdt(generation, board, configured, boardView, hideCompletedTiles));
     }
 
     /** Safe to call from any thread. */
     public void renderLoading() {
-        SwingUtilities.invokeLater(() -> renderMessage(
+        scheduleScreen(generation -> renderMessage(
+            generation,
             "Loading board",
             "Fetching your team's tiles\u2026"
         ));
@@ -847,7 +859,8 @@ public class BingoPanel extends PluginPanel {
      * connection actually explains.
      */
     public void renderLoadError() {
-        SwingUtilities.invokeLater(() -> renderMessage(
+        scheduleScreen(generation -> renderMessage(
+            generation,
             "Couldn't load board",
             "Check your connection, then press Refresh"
         ));
@@ -862,15 +875,35 @@ public class BingoPanel extends PluginPanel {
         // The wording lives in BingoErrors alongside the claim-failure phrasing, so the
         // sidebar and the chat line cannot drift apart.
         String reason = BingoErrors.describeBoardError(backendError);
-        SwingUtilities.invokeLater(() -> renderMessage("Couldn't load board", reason));
+        scheduleScreen(generation -> renderMessage(generation, "Couldn't load board", reason));
+    }
+
+    /**
+     * Run one screen on the event thread unless a newer screen was requested first.
+     * <p>
+     * The generation is taken before the task is queued, so a screen that
+     * {@link SwingUtil#fastRemoveAll} runs early still counts as newer than the one that
+     * pumped it.
+     */
+    private void scheduleScreen(IntConsumer screen) {
+        int generation = renderGeneration.incrementAndGet();
+        SwingUtilities.invokeLater(() -> {
+            if (generation == renderGeneration.get()) {
+                screen.accept(generation);
+            }
+        });
     }
 
     private void renderOnEdt(
+        int generation,
         BingoBoard board,
         boolean configured,
         BoardView boardView,
         boolean hideCompletedTiles
     ) {
+        if (generation != renderGeneration.get()) {
+            return;
+        }
         // Remembered so a filter change can redraw these same rows without a fetch.
         lastBoard = board;
         lastConfigured = configured;
@@ -879,18 +912,23 @@ public class BingoPanel extends PluginPanel {
         emptyState = "";
 
         if (!configured) {
-            renderMessage("Not configured", "Set a Backend URL in the config");
+            renderMessage(generation, "Not configured", "Set a Backend URL in the config");
             return;
         }
 
         if (!board.isConfigured()) {
-            renderMessage("No team", "Your RSN is not on the Teams tab");
+            renderMessage(generation, "No team", "Your RSN is not on the Teams tab");
             return;
         }
 
         // The rows are on screen from here, which is what a filter change on this thread consults.
         showingBoard = true;
         SwingUtil.fastRemoveAll(itemsPanel);
+        // Removing the old rows runs every event already queued, including a screen requested
+        // after this one. That screen is the one the player asked for last.
+        if (generation != renderGeneration.get()) {
+            return;
+        }
 
         headerLabel.setText(boardText(staleReason == null
             ? board.getTeam() : board.getTeam() + " \u2014 not live"));
@@ -1055,10 +1093,16 @@ public class BingoPanel extends PluginPanel {
      * clear the freshness line or hide the filter strip. Both must go: there is nothing for
      * either to describe.
      */
-    private void renderMessage(String header, String status) {
+    private void renderMessage(int generation, String header, String status) {
+        if (generation != renderGeneration.get()) {
+            return;
+        }
         // A message screen has no rows for a filter change to redraw.
         showingBoard = false;
         SwingUtil.fastRemoveAll(itemsPanel);
+        if (generation != renderGeneration.get()) {
+            return;
+        }
         headerLabel.setText(header);
         statusLabel.setForeground(LIVE_STATUS_COLOR);
         statusLabel.setText(status);

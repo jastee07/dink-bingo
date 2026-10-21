@@ -159,11 +159,48 @@ class BingoPanelTest {
         // observed the previous board would paint those rows back over the error.
         panel.render(board, true, BoardView.NAMED_TILES, false);
         flush();
+        int beforeError = panel.renderCount();
         panel.renderLoadError("bad_token");
-        flush();
+        awaitRender(panel, beforeError);
         assertEquals("", panel.freshnessText());
         onEdt(() -> panel.setSearch("whip"));
         flush();
+        assertEquals("Couldn't load board", headerText(panel));
+    }
+
+    /**
+     * Removing the old rows runs events already queued behind that render. A load error
+     * requested from inside that removal is the screen that has to remain: the board render
+     * has already started, and painting it afterwards covers the error while the freshness
+     * flag still says there is nothing on screen.
+     */
+    @Test
+    void aScreenRequestedDuringRowRemovalIsTheOneThatStays() throws Exception {
+        BingoPanel panel = panel();
+        panel.markRefreshSucceeded();
+        BingoBoard board = new BingoBoard("Team One", tiles(), true);
+        render(panel, board, BoardView.NAMED_TILES, false);
+
+        // The first row's removal asks for the error. The rows after it are what actually
+        // run that request, because row removal pumps the queue once per row.
+        boolean[] requested = {false};
+        onEdt(() -> itemList(panel).add(new JPanel() {
+            @Override
+            public void removeNotify() {
+                super.removeNotify();
+                if (requested[0]) {
+                    return;
+                }
+                requested[0] = true;
+                panel.renderLoadError("bad_token");
+            }
+        }, 0));
+
+        int before = panel.renderCount();
+        panel.render(board, true, BoardView.NAMED_TILES, false);
+        awaitRender(panel, before);
+
+        assertEquals("", panel.freshnessText());
         assertEquals("Couldn't load board", headerText(panel));
     }
 
@@ -594,6 +631,13 @@ class BingoPanelTest {
             }
         });
         return tips;
+    }
+
+    /** The row list. The caller is already on the event thread. */
+    private static JPanel itemList(BingoPanel panel) {
+        JScrollPane scrollPane = (JScrollPane) ((BorderLayout) panel.getLayout())
+            .getLayoutComponent(BorderLayout.CENTER);
+        return (JPanel) scrollPane.getViewport().getView();
     }
 
     private static List<String> rowNames(BingoPanel panel) throws Exception {
