@@ -71,6 +71,17 @@ public class BingoClient {
         return parseUrl() != null;
     }
 
+    /**
+     * What the configured backend URL amounts to, for the readiness report.
+     * <p>
+     * Everything else here only needs to know whether a request can be made, but "unset",
+     * "not a URL", and "not HTTPS" are three different mistakes with three different fixes,
+     * and the parse is the only place that can tell them apart.
+     */
+    public BackendUrlState backendUrlState() {
+        return resolve().state;
+    }
+
     public CompletableFuture<BoardResult> fetchBoard(String rsn) {
         HttpUrl base = parseUrl();
         if (base == null || rsn == null) {
@@ -160,27 +171,34 @@ public class BingoClient {
      * chat line.
      */
     private HttpUrl parseUrl() {
+        return resolve().url;
+    }
+
+    private ParsedUrl resolve() {
         String raw = config.backendUrl();
         raw = raw == null ? "" : raw.trim();
         ParsedUrl cached = parsed;
         if (raw.equals(cached.raw)) {
-            return cached.url;
+            return cached;
         }
-        ParsedUrl fresh = new ParsedUrl(raw, validate(raw));
+        ParsedUrl fresh = validate(raw);
         parsed = fresh;
-        return fresh.url;
+        return fresh;
     }
 
-    private static HttpUrl validate(String raw) {
+    private static ParsedUrl validate(String raw) {
+        if (raw.isEmpty()) {
+            return new ParsedUrl(raw, null, BackendUrlState.UNSET);
+        }
         HttpUrl url = HttpUrl.parse(raw);
         if (url == null) {
-            return null;
+            return new ParsedUrl(raw, null, BackendUrlState.INVALID);
         }
         if (url.isHttps() || isLoopback(url.host())) {
-            return url;
+            return new ParsedUrl(raw, url, BackendUrlState.OK);
         }
         log.warn("Bingo backend URL must use HTTPS");
-        return null;
+        return new ParsedUrl(raw, null, BackendUrlState.INSECURE);
     }
 
     private static boolean isLoopback(String host) {
@@ -190,9 +208,31 @@ public class BingoClient {
     }
 
     private <T> CompletableFuture<T> executeWithRetry(Request request, Class<T> type) {
-        CompletableFuture<T> future = new CompletableFuture<>();
-        attempt(request, type, 1, future);
-        return future;
+        Exchange<T> exchange = new Exchange<>(request, type);
+        send(exchange, 1);
+        return exchange.future;
+    }
+
+    /**
+     * One request and the future that answers it, so a retry does not have to carry the
+     * request, the response type, and the future through every step by hand. Only the attempt
+     * number changes between attempts, and it is passed separately for exactly that reason.
+     */
+    private static final class Exchange<T> {
+
+        final Request request;
+        final Class<T> type;
+        final CompletableFuture<T> future = new CompletableFuture<>();
+
+        Exchange(Request request, Class<T> type) {
+            this.request = request;
+            this.type = type;
+        }
+
+        /** Give up on this exchange. Callers must always reach here or complete the future. */
+        void giveUp() {
+            future.complete(null);
+        }
     }
 
     /**
@@ -201,26 +241,26 @@ public class BingoClient {
      * itself waits on OkHttp's dispatcher pool, so RuneLite's single shared scheduled thread is
      * never held for the length of a request.
      */
-    private <T> void attempt(Request request, Class<T> type, int attemptNumber, CompletableFuture<T> future) {
-        submit(future, () -> executor.execute(() -> {
-            if (future.isDone()) {
+    private <T> void send(Exchange<T> exchange, int attemptNumber) {
+        submit(exchange, () -> executor.execute(() -> {
+            if (exchange.future.isDone()) {
                 return;
             }
             try {
-                httpClient.newCall(request).enqueue(new Callback() {
+                httpClient.newCall(exchange.request).enqueue(new Callback() {
                     @Override
                     public void onFailure(Call call, IOException e) {
-                        failed(request, type, attemptNumber, future, e);
+                        failed(exchange, attemptNumber, e);
                     }
 
                     @Override
                     public void onResponse(Call call, Response response) {
-                        handle(request, type, attemptNumber, future, response);
+                        handle(exchange, attemptNumber, response);
                     }
                 });
             } catch (Exception e) {
                 log.warn("Unexpected failure talking to the bingo backend", e);
-                future.complete(null);
+                exchange.giveUp();
             }
         }));
     }
@@ -230,39 +270,38 @@ public class BingoClient {
      * by a callback, so an escaping failure would leave the future uncompleted and pin
      * {@code BingoDetector}'s in-flight marker for the item.
      */
-    private <T> void handle(Request request, Class<T> type, int attemptNumber,
-                            CompletableFuture<T> future, Response response) {
+    private <T> void handle(Exchange<T> exchange, int attemptNumber, Response response) {
         try (Response closing = response) {
             if (closing.isSuccessful()) {
-                complete(request, type, attemptNumber, future, closing.body());
+                complete(exchange, attemptNumber, closing.body());
                 return;
             }
 
             if (isRetryableHttp(closing.code()) && attemptNumber < MAX_ATTEMPTS) {
-                retry(request, type, attemptNumber, future, "HTTP " + closing.code());
+                retry(exchange, attemptNumber, "HTTP " + closing.code());
             } else {
                 log.warn("Bingo backend returned HTTP {}", closing.code());
-                future.complete(null);
+                exchange.giveUp();
             }
         } catch (IOException e) {
             // The response arrived but reading it failed part way through, which is the same
             // kind of transport failure as never reaching the backend at all.
-            failed(request, type, attemptNumber, future, e);
+            failed(exchange, attemptNumber, e);
         } catch (Exception e) {
             log.warn("Unexpected failure talking to the bingo backend", e);
-            future.complete(null);
+            exchange.giveUp();
         }
     }
 
-    private <T> void complete(Request request, Class<T> type, int attemptNumber,
-                              CompletableFuture<T> future, ResponseBody body) throws IOException {
+    private <T> void complete(Exchange<T> exchange, int attemptNumber, ResponseBody body)
+        throws IOException {
         String raw = body != null ? body.string() : "";
         try {
-            T parsed = gson.fromJson(raw, type);
+            T parsed = gson.fromJson(raw, exchange.type);
             if (isRetryable(parsed) && attemptNumber < MAX_ATTEMPTS) {
-                retry(request, type, attemptNumber, future, "retryable backend response");
+                retry(exchange, attemptNumber, "retryable backend response");
             } else {
-                future.complete(parsed);
+                exchange.future.complete(parsed);
             }
         } catch (JsonSyntaxException e) {
             // Apps Script serves an HTML error page when the deployment is misconfigured.
@@ -270,17 +309,16 @@ public class BingoClient {
             // credentials into it.
             log.warn("Bingo backend returned non-JSON (check the deployment is " +
                 "'Execute as: Me' and 'Who has access: Anyone')");
-            future.complete(null);
+            exchange.giveUp();
         }
     }
 
-    private <T> void failed(Request request, Class<T> type, int attemptNumber,
-                            CompletableFuture<T> future, IOException e) {
+    private <T> void failed(Exchange<T> exchange, int attemptNumber, IOException e) {
         if (attemptNumber < MAX_ATTEMPTS) {
-            retry(request, type, attemptNumber, future, e.toString());
+            retry(exchange, attemptNumber, e.toString());
         } else {
             log.warn("Bingo backend unreachable after {} attempts", MAX_ATTEMPTS, e);
-            future.complete(null);
+            exchange.giveUp();
         }
     }
 
@@ -292,11 +330,11 @@ public class BingoClient {
         return code == 408 || code == 429 || code >= 500;
     }
 
-    private <T> void retry(Request request, Class<T> type, int attemptNumber, CompletableFuture<T> future, String cause) {
+    private <T> void retry(Exchange<T> exchange, int attemptNumber, String cause) {
         long delay = BASE_BACKOFF_MS * (1L << (attemptNumber - 1));
         log.debug("Retrying bingo request in {}ms (attempt {} failed: {})", delay, attemptNumber, cause);
-        submit(future, () -> executor.schedule(
-            () -> attempt(request, type, attemptNumber + 1, future),
+        submit(exchange, () -> executor.schedule(
+            () -> send(exchange, attemptNumber + 1),
             delay,
             TimeUnit.MILLISECONDS
         ));
@@ -308,12 +346,12 @@ public class BingoClient {
      * the first attempt and is swallowed entirely on the retry path, and either way the future
      * never completes, so {@code BingoDetector} never clears its in-flight marker for the item.
      */
-    private <T> void submit(CompletableFuture<T> future, Runnable scheduling) {
+    private <T> void submit(Exchange<T> exchange, Runnable scheduling) {
         try {
             scheduling.run();
         } catch (RejectedExecutionException e) {
             log.debug("Bingo request dropped because the executor is shutting down");
-            future.complete(null);
+            exchange.giveUp();
         }
     }
 
@@ -321,14 +359,16 @@ public class BingoClient {
     private static final class ParsedUrl {
 
         /** Matches no configured value, so the first lookup always parses. */
-        static final ParsedUrl UNPARSED = new ParsedUrl(null, null);
+        static final ParsedUrl UNPARSED = new ParsedUrl(null, null, BackendUrlState.UNSET);
 
         final String raw;
         final HttpUrl url;
+        final BackendUrlState state;
 
-        ParsedUrl(String raw, HttpUrl url) {
+        ParsedUrl(String raw, HttpUrl url, BackendUrlState state) {
             this.raw = raw;
             this.url = url;
+            this.state = state;
         }
     }
 }

@@ -136,13 +136,78 @@ function output(result) {
   return JSON.parse(result.text);
 }
 
+// setupLeaderboard's formulas, captured by running it against a recording sheet.
+//
+// Previously these were scraped out of Code.gs with a regex over the source text and
+// re-evaluated, which only worked while every formula was one self-contained literal laid out
+// in exactly the expected shape. Running the real function instead tests what an organizer
+// would actually get, and does not care how the formula is assembled.
+const leaderboardFormulas = (() => {
+  const formulas = {};
+  const range = cell => ({
+    setFormula(formula) {
+      formulas[cell] = formula;
+      return this;
+    },
+    setValue() {
+      return this;
+    },
+    setValues() {
+      return this;
+    },
+    setBackground() {
+      return this;
+    },
+    setFontWeight() {
+      return this;
+    },
+    setFontColor() {
+      return this;
+    },
+    setFontSize() {
+      return this;
+    },
+    setNumberFormat() {
+      return this;
+    },
+    clearContent() {
+      return this;
+    }
+  });
+  const sheet = {
+    getRange: range,
+    getMaxColumns: () => 100,
+    insertColumnsAfter() {},
+    setColumnWidth() {},
+    setColumnWidths() {},
+    setFrozenColumns() {},
+    setTabColor() {},
+    setConditionalFormatRules() {}
+  };
+  // setupLeaderboard builds conditional format rules; the chained builder is stubbed here
+  // because the rules themselves are formatting, not the derived values under test.
+  const ruleBuilder = {
+    whenTextStartsWith: () => ruleBuilder,
+    whenTextDoesNotContain: () => ruleBuilder,
+    setBackground: () => ruleBuilder,
+    setFontColor: () => ruleBuilder,
+    setRanges: () => ruleBuilder,
+    build: () => ({})
+  };
+  const previous = context.SpreadsheetApp.newConditionalFormatRule;
+  context.SpreadsheetApp.newConditionalFormatRule = () => ruleBuilder;
+  try {
+    context.setupLeaderboard(sheet);
+  } finally {
+    context.SpreadsheetApp.newConditionalFormatRule = previous;
+  }
+  return formulas;
+})();
+
 function generatedFormula(cell) {
-  const pattern = new RegExp(
-    `sh\\.getRange\\('${cell}'\\)\\.setFormula\\(\\n([\\s\\S]*?)\\n  \\);`
-  );
-  const match = code.match(pattern);
-  assert(match, `missing generated formula for ${cell}`);
-  return vm.runInNewContext(match[1].trim());
+  const formula = leaderboardFormulas[cell];
+  assert(formula, `missing generated formula for ${cell}`);
+  return formula;
 }
 
 function assertBalancedFormula(cell) {
@@ -561,6 +626,46 @@ assert(
 assert(
   generatedFormula("E26").includes('progress&\"/\"&needed'),
   "the team matrix must display partial K-of-N progress"
+);
+
+// Completed and Remaining Tiles must partition the board, as must Points and Remaining
+// Points. They are the same count either side of the threshold, so the pair has to differ
+// only in the comparator: any other difference means a team's completed and remaining columns
+// no longer add up to the whole board.
+[["B5", "D5"], ["C5", "E5"]].forEach(([done, left]) => {
+  assert.strictEqual(
+    generatedFormula(done).replace(">=needed", "<needed"),
+    generatedFormula(left),
+    `${done} and ${left} must be the same expression either side of the threshold`
+  );
+});
+
+// Every column that reads required_count has to default a blank one to 1, exactly as
+// buildTileCatalog does, or a tile the organizer left blank reads as unreachable.
+["B5", "C5", "D5", "E5", "E26"].forEach(cell => {
+  assert(
+    generatedFormula(cell).includes('IF(value="",1,value)'),
+    cell + " must treat a blank required_count as 1, as the backend does"
+  );
+});
+
+// A tab's header row is the backend's contract with the sheet, so the two ways of creating
+// one must agree. setupSheet builds every tab from SHEET_HEADERS and upgradeGroupedTiles adds
+// Attempts from the same place; a hand-written second copy is how a column gets added for new
+// events and forgotten for upgraded ones.
+// Array.from because SHEET_HEADERS is built inside the vm context and its arrays carry that
+// context's prototype, which deepStrictEqual compares.
+["Items", "Teams", "Claims", "Audit", "Attempts", "Config"].forEach(tab => {
+  assert.deepStrictEqual(
+    Array.from(context.SHEET_HEADERS[tab]),
+    sheets[tab][0],
+    tab + "'s schema must match the header row these tests run against"
+  );
+});
+const upgradeSource = code.slice(code.indexOf("function upgradeGroupedTiles"));
+assert(
+  !/appendRow\(\s*\[\s*'claim_id'/.test(upgradeSource),
+  "upgradeGroupedTiles must create Attempts from SHEET_HEADERS, not its own column list"
 );
 
 // ---------------------------------------------------------------------------
@@ -1182,5 +1287,176 @@ sheets.Attempts = ledgerRows;
 
 sheets.Claims = claimsBeforeLedger;
 sheets.Teams = teamsBeforeLedger;
+
+// ---------------------------------------------------------------------------
+// Each rejectClaim branch records one Audit row and one Attempts row, and a retry of that
+// claim id returns the same decision after the sheet has changed underneath it. A new claim
+// id, issued after that change, is the control: it must see the new state, or the test
+// would pass even if the retry were re-evaluated instead of replayed.
+// ---------------------------------------------------------------------------
+
+const rejectClaimSnapshot = ["Items", "Teams", "Claims", "Audit", "Attempts", "Config"]
+  .reduce((saved, name) => {
+    saved[name] = sheets[name].map(row => row.slice());
+    return saved;
+  }, {});
+
+function participantClaim(overrides) {
+  return Object.assign({
+    token: "participant-secret",
+    rsn: "Jake",
+    itemId: 4151,
+    itemName: "Abyssal whip",
+    source: "test"
+  }, overrides);
+}
+
+function assertRejectClaimRecorded(label, request, mutate, freshRequest) {
+  const claimsBefore = sheets.Claims.length;
+  const auditBefore = sheets.Audit.length;
+  const attemptsBefore = sheets.Attempts.length;
+  const first = output(context.handleClaim(request));
+
+  const auditAdded = sheets.Audit.slice(auditBefore);
+  const attemptsAdded = sheets.Attempts.slice(attemptsBefore);
+  assert.strictEqual(auditAdded.length, 1, label + " writes one Audit row");
+  assert.strictEqual(attemptsAdded.length, 1, label + " writes one Attempts row");
+  assert.strictEqual(String(auditAdded[0][3]), first.status, label + " Audit result");
+  assert.strictEqual(String(attemptsAdded[0][0]), request.claimId, label + " Attempts claim id");
+  assert.strictEqual(String(attemptsAdded[0][4]), first.status, label + " Attempts status");
+  assert.strictEqual(sheets.Claims.length, claimsBefore, label + " writes no Claims row");
+
+  mutate();
+  const fresh = output(context.handleClaim(freshRequest));
+  assert.notStrictEqual(
+    fresh.status,
+    first.status,
+    label + " control: a new claim id is evaluated against the sheet now"
+  );
+
+  const auditAfter = sheets.Audit.length;
+  const attemptsAfter = sheets.Attempts.length;
+  const claimsAfter = sheets.Claims.length;
+  const replay = output(context.handleClaim(request));
+  assert.strictEqual(replay.status, first.status, label + " replay keeps the original status");
+  assert.strictEqual(replay.replay, true, label + " replay is marked as one");
+  // The fields describe() reads. A completed-tile duplicate's body names the contribution
+  // that finished the tile, while the ledger names the item that was submitted: that is
+  // what makes a reused claim id fail closed, and the chat line only needs the tile.
+  ["tileId", "tileName", "complete", "team"].forEach(field => {
+    if (Object.prototype.hasOwnProperty.call(first, field)) {
+      assert.strictEqual(replay[field], first[field], label + " replay keeps " + field);
+    }
+  });
+  if (first.itemId === request.itemId) {
+    assert.strictEqual(replay.itemId, first.itemId, label + " replay keeps itemId");
+    if (first.itemName != null) {
+      assert.strictEqual(replay.itemName, first.itemName, label + " replay keeps itemName");
+    }
+  }
+  const again = output(context.handleClaim(request));
+  assert.deepStrictEqual(again, replay, label + " a second replay returns the same response");
+  assert.strictEqual(sheets.Audit.length, auditAfter, label + " replay writes no Audit row");
+  assert.strictEqual(sheets.Attempts.length, attemptsAfter, label + " replay writes no Attempts row");
+  assert.strictEqual(sheets.Claims.length, claimsAfter, label + " replay writes no Claims row");
+  return first;
+}
+
+function resetClaimWorld() {
+  sheets.Items = [
+    ["tile_id", "tile_name", "item_id", "item_name", "points", "required_count", "notes"],
+    ["rare-drop", "Any rare drop", 4151, "Abyssal whip", 3, 1, ""],
+    ["rare-drop", "Any rare drop", 21034, "Dexterous prayer scroll", 3, 1, ""],
+    ["pair", "Any two", 111, "Item A", 1, 2, ""],
+    ["pair", "Any two", 222, "Item B", 1, 2, ""]
+  ];
+  sheets.Teams = [["rsn", "team"], ["jake", "Team One"]];
+  sheets.Claims = [[
+    "team", "tile_id", "tile_name", "item_id", "item_name", "rsn", "claimed_at",
+    "claim_id", "source", "progress_after", "completed_tile"
+  ]];
+  sheets.Config = [
+    ["key", "value"],
+    ["token", "participant-secret"],
+    ["admin_token", "organizer-secret"]
+  ];
+}
+
+resetClaimWorld();
+sheets.Config.push(["event_start", new Date(Date.now() + 60 * 60 * 1000)]);
+assertRejectClaimRecorded(
+  "event_closed",
+  participantClaim({ claimId: "reject-closed", itemId: 4151, itemName: "Abyssal whip" }),
+  () => { sheets.Config.pop(); },
+  participantClaim({ claimId: "reject-closed-fresh", itemId: 4151, itemName: "Abyssal whip" })
+);
+
+resetClaimWorld();
+assertRejectClaimRecorded(
+  "not_on_team",
+  participantClaim({
+    claimId: "reject-team", rsn: "Ghost", itemId: 4151, itemName: "Abyssal whip"
+  }),
+  () => { sheets.Teams.push(["Ghost", "Team One"]); },
+  participantClaim({
+    claimId: "reject-team-fresh", rsn: "Ghost", itemId: 4151, itemName: "Abyssal whip"
+  })
+);
+
+resetClaimWorld();
+assertRejectClaimRecorded(
+  "not_on_board",
+  participantClaim({ claimId: "reject-board", itemId: 995, itemName: "Coins" }),
+  () => { sheets.Items.push(["coins", "Coins", 995, "Coins", 1, 1, ""]); },
+  participantClaim({ claimId: "reject-board-fresh", itemId: 995, itemName: "Coins" })
+);
+
+resetClaimWorld();
+const completedTile = output(context.handleClaim(
+  participantClaim({ claimId: "reject-complete-setup" })
+));
+assert.strictEqual(completedTile.status, "claimed");
+const tileDuplicate = assertRejectClaimRecorded(
+  "duplicate tile_complete",
+  participantClaim({
+    claimId: "reject-tile-complete",
+    itemId: 21034,
+    itemName: "Dexterous prayer scroll"
+  }),
+  () => { sheets.Claims = [sheets.Claims[0].slice()]; },
+  participantClaim({
+    claimId: "reject-tile-complete-fresh",
+    itemId: 21034,
+    itemName: "Dexterous prayer scroll"
+  })
+);
+assert.strictEqual(tileDuplicate.duplicateReason, "tile_complete");
+
+resetClaimWorld();
+const progressedTile = output(context.handleClaim(participantClaim({
+  claimId: "reject-progress-setup",
+  itemId: 111,
+  itemName: "Item A"
+})));
+assert.strictEqual(progressedTile.status, "progress");
+const itemDuplicate = assertRejectClaimRecorded(
+  "duplicate item_recorded",
+  participantClaim({
+    claimId: "reject-item-recorded",
+    itemId: 111,
+    itemName: "Item A"
+  }),
+  () => { sheets.Claims = [sheets.Claims[0].slice()]; },
+  participantClaim({
+    claimId: "reject-item-recorded-fresh",
+    itemId: 111,
+    itemName: "Item A"
+  })
+);
+assert.strictEqual(itemDuplicate.duplicateReason, "item_recorded");
+
+Object.keys(rejectClaimSnapshot).forEach(name => {
+  sheets[name] = rejectClaimSnapshot[name];
+});
 
 console.log("Apps Script grouped-tile and security tests passed");

@@ -9,6 +9,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import dinkbingo.BingoResponses.ClaimRequest;
 import dinkbingo.BingoResponses.ClaimResponse;
+import net.runelite.client.config.ConfigItem;
 import okhttp3.OkHttpClient;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -21,6 +22,7 @@ import org.mockito.MockitoAnnotations;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -91,6 +93,44 @@ class BingoClientTest {
     void acceptsALoopbackDevelopmentServerOverPlainHttp() {
         when(config.backendUrl()).thenReturn("http://localhost:8080/exec");
         assertTrue(client.isConfigured());
+    }
+
+    /**
+     * "Unset", "not a URL", and "not HTTPS" are three different mistakes with three different
+     * fixes, and the parse is the only place that can tell them apart. Everything else here
+     * only needs the boolean, so the distinction is easy to lose.
+     */
+    @Test
+    void reportsWhyAnUnusableBackendUrlIsUnusable() {
+        when(config.backendUrl()).thenReturn("  ");
+        assertEquals(BackendUrlState.UNSET, client.backendUrlState());
+
+        when(config.backendUrl()).thenReturn("not a url");
+        assertEquals(BackendUrlState.INVALID, client.backendUrlState());
+
+        when(config.backendUrl()).thenReturn("http://example.com/exec");
+        assertEquals(BackendUrlState.INSECURE, client.backendUrlState());
+
+        when(config.backendUrl()).thenReturn("https://example.com/exec");
+        assertEquals(BackendUrlState.OK, client.backendUrlState());
+        assertTrue(client.backendUrlState().isUsable());
+
+        // A loopback development server is usable, and must not be reported as insecure.
+        when(config.backendUrl()).thenReturn("http://localhost:8080/exec");
+        assertEquals(BackendUrlState.OK, client.backendUrlState());
+    }
+
+    /**
+     * Plugin Hub requires a warning on the setting that sends player data to a server the
+     * player configures. The backend URL is that setting.
+     */
+    @Test
+    void theBackendUrlWarnsBeforePlayerDataIsSent() throws Exception {
+        ConfigItem item = BingoConfig.class.getMethod("backendUrl").getAnnotation(ConfigItem.class);
+        assertNotNull(item);
+        String warning = item.warning().toLowerCase(Locale.ROOT);
+        assertFalse(warning.isBlank(), "the backend URL needs a third-party server warning");
+        assertTrue(warning.contains("rsn"), warning);
     }
 
     /**

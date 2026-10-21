@@ -48,6 +48,8 @@ public interface BingoConfig extends Config {
         name = "Backend URL",
         description = "The HTTPS Apps Script web app URL for your event (ends in /exec).<br/>" +
             "Nothing is sent anywhere until this is set.",
+        warning = "This server is not run by RuneLite. Your IP address, RSN, event token, " +
+            "and received items are sent to it.",
         position = 1,
         section = connectionSection
     )

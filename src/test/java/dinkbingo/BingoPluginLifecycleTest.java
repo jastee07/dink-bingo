@@ -7,6 +7,9 @@ import net.runelite.api.Player;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.chat.ChatMessageManager;
 import net.runelite.client.chat.QueuedMessage;
+import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.plugins.Plugin;
+import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.overlay.OverlayManager;
 import org.junit.jupiter.api.BeforeEach;
@@ -21,6 +24,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -28,6 +33,8 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -61,6 +68,8 @@ class BingoPluginLifecycleTest {
     @Mock
     private BingoPanel panel;
     @Mock
+    private PluginManager pluginManager;
+    @Mock
     private OverlayManager overlayManager;
     @Mock
     private BingoVerificationOverlay verificationOverlay;
@@ -81,9 +90,11 @@ class BingoPluginLifecycleTest {
         inject("detector", detector);
         inject("announcer", announcer);
         inject("panel", panel);
+        inject("pluginManager", pluginManager);
         inject("overlayManager", overlayManager);
         inject("verificationOverlay", verificationOverlay);
 
+        when(pluginManager.getPlugins()).thenReturn(Collections.emptyList());
         when(config.refreshMinutes()).thenReturn(5);
         when(config.boardView()).thenReturn(BoardView.NAMED_TILES);
         when(bingoClient.isConfigured()).thenReturn(true);
@@ -96,6 +107,64 @@ class BingoPluginLifecycleTest {
             invocation.<Runnable>getArgument(0).run();
             return null;
         }).when(clientThread).invokeLater(any(Runnable.class));
+    }
+
+    /**
+     * A board fetch that fails by throwing rather than by completing its future must still
+     * release the in-flight marker.
+     * <p>
+     * The marker is what coalesces concurrent refreshes, so a throw that left it set would
+     * make every later refresh -- the timer, the Refresh button, a login, a config change --
+     * decide a fetch was already outstanding and do nothing. The board would stop updating
+     * for the rest of the session with nothing on screen to say so.
+     */
+    @Test
+    void aFetchThatThrowsDoesNotWedgeEveryLaterRefresh() throws Exception {
+        when(bingoClient.fetchBoard("Jake"))
+            .thenThrow(new IllegalStateException("client blew up"))
+            .thenReturn(CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+
+        plugin.startUp();
+
+        // The throw was reported as a failed round trip rather than swallowed.
+        verify(panel, atLeastOnce()).renderLoadError();
+
+        // The next refresh must actually reach the client instead of coalescing into a
+        // pending flag behind a marker nothing will clear.
+        plugin.refreshBoard();
+        verify(bingoClient, times(2)).fetchBoard("Jake");
+        verify(panel, atLeastOnce()).markRefreshSucceeded();
+    }
+
+    /**
+     * A new backend or token is a different event with a different board. A search or filter
+     * left over from the old one would quietly present the new board as half empty.
+     */
+    @Test
+    void pointingAtANewEventClearsTheSidebarFilters() throws Exception {
+        when(bingoClient.fetchBoard("Jake"))
+            .thenReturn(CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+
+        plugin.startUp();
+        // The panel outlives a restart, so the run starts from an unfiltered board.
+        verify(panel).clearFilters();
+
+        plugin.onConfigChanged(configChanged("eventToken"));
+
+        verify(panel, times(2)).clearFilters();
+    }
+
+    /** Switching view or hiding completed tiles is not a new event, and keeps the filters. */
+    @Test
+    void aBoardPanelSettingChangeLeavesTheFiltersAlone() throws Exception {
+        when(bingoClient.fetchBoard("Jake"))
+            .thenReturn(CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+
+        plugin.startUp();
+
+        plugin.onConfigChanged(configChanged("boardView"));
+
+        verify(panel, times(1)).clearFilters();
     }
 
     @Test
@@ -344,6 +413,59 @@ class BingoPluginLifecycleTest {
         verify(panel, times(1)).markRefreshSucceeded();
     }
 
+    /**
+     * A hop does not apply the fetch already in flight: the generation moved on when the next
+     * refresh found nobody logged in. Once that response is dropped, the report has to leave
+     * CHECKING, because nothing is fetching anymore.
+     */
+    @Test
+    void aDroppedRefreshWhileLoggedOutDoesNotStayChecking() throws Exception {
+        CompletableFuture<BoardResult> pending = new CompletableFuture<>();
+        when(bingoClient.fetchBoard("Jake")).thenReturn(pending);
+
+        plugin.startUp();
+        assertEquals(SystemStatus.Fetch.CHECKING, lastStatus().getFetch());
+
+        when(client.getGameState()).thenReturn(GameState.HOPPING);
+        plugin.refreshBoard();
+        pending.complete(BoardResult.of(board("Stale Team")));
+
+        assertEquals(SystemStatus.Fetch.NOT_CHECKED, lastStatus().getFetch());
+        verify(panel, never()).render(any(), anyBoolean(), any(), anyBoolean());
+        verify(detector, never()).setBoard(any());
+        verify(bingoClient, times(1)).fetchBoard("Jake");
+    }
+
+    /**
+     * The same drop after a board has loaded restores the verdict that board earned. The late
+     * response is not a new refusal, and it must not keep the report on CHECKING either.
+     */
+    @Test
+    void aDroppedRefreshKeepsTheVerdictTheBoardAlreadyEarned() throws Exception {
+        CompletableFuture<BoardResult> pending = new CompletableFuture<>();
+        BingoBoard loaded = board("Current Team");
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(loaded)),
+            pending);
+
+        plugin.startUp();
+        assertEquals(SystemStatus.Fetch.LOADED, lastStatus().getFetch());
+
+        plugin.refreshBoard();
+        assertEquals(SystemStatus.Fetch.CHECKING, lastStatus().getFetch());
+        // Still logged in, so this coalesces behind the fetch above and is run when it ends.
+        plugin.refreshBoard();
+        when(client.getGameState()).thenReturn(GameState.HOPPING);
+        pending.complete(BoardResult.rejected("bad_token"));
+
+        assertEquals(SystemStatus.Fetch.LOADED, lastStatus().getFetch());
+        assertNull(lastStatus().getBackendError());
+        verify(bingoClient, times(2)).fetchBoard("Jake");
+        verify(panel, times(1)).markRefreshSucceeded();
+        verify(detector, never()).setDetectionEnabled(false);
+        verify(panel, never()).renderStale(any(), anyBoolean(), any(), anyBoolean(), anyString());
+    }
+
     @Test
     void aCompletionAfterShutdownRecordsNothing() throws Exception {
         CompletableFuture<BoardResult> pending = new CompletableFuture<>();
@@ -455,6 +577,148 @@ class BingoPluginLifecycleTest {
         Field field = BingoPlugin.class.getDeclaredField(name);
         field.setAccessible(true);
         field.set(plugin, value);
+    }
+
+    private static ConfigChanged configChanged(String key) {
+        ConfigChanged event = new ConfigChanged();
+        event.setGroup(BingoConfig.GROUP);
+        event.setKey(key);
+        return event;
+    }
+
+    // ------------------------------------------------------------------
+    // readiness report
+    // ------------------------------------------------------------------
+
+    /**
+     * The report is a read. It reuses the ordinary board fetch and nothing else, so pressing
+     * it can no more change a tile than pressing Refresh can.
+     */
+    @Test
+    void runningTheChecksOnlyReadsTheBoard() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+        when(config.eventToken()).thenReturn("token");
+        when(bingoClient.backendUrlState()).thenReturn(BackendUrlState.OK);
+        when(detector.isDetectionEnabled()).thenReturn(true);
+
+        plugin.startUp();
+        ArgumentCaptor<Runnable> handler = ArgumentCaptor.forClass(Runnable.class);
+        verify(panel).setSystemCheckHandler(handler.capture());
+
+        handler.getValue().run();
+
+        verify(bingoClient, never()).submitClaim(any());
+        verify(panel, atLeastOnce()).renderSystemCheck(any(SystemStatus.class));
+    }
+
+    /**
+     * The whole point of the view: an organizer rotates the token mid-event, every drop stops
+     * counting, and the report has to name the token rather than leave the player guessing at
+     * their connection.
+     */
+    @Test
+    void aRejectedRefreshIsReportedAsTheTokenAndNotAsAConnectionProblem() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.rejected("bad_token")));
+        when(config.eventToken()).thenReturn("token");
+        when(bingoClient.backendUrlState()).thenReturn(BackendUrlState.OK);
+
+        plugin.startUp();
+
+        SystemStatus status = lastStatus();
+        assertEquals(SystemStatus.Fetch.REJECTED, status.getFetch());
+        assertEquals("bad_token", status.getBackendError());
+
+        SystemCheck check = SystemCheck.evaluate(status);
+        assertEquals(SystemCheck.State.FAILED, rowState(check, "Event token"));
+        // The round trip worked, so the connection is not what to go and look at.
+        assertEquals(SystemCheck.State.READY, rowState(check, "Backend"));
+    }
+
+    /**
+     * A new backend or token is a different event. Carrying the old verdict forward would
+     * report the previous event's setup as this one's, which is worse than saying nothing.
+     */
+    @Test
+    void pointingAtANewEventForgetsWhatTheOldOneProved() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.rejected("bad_token")),
+            CompletableFuture.completedFuture(BoardResult.unreachable()));
+        when(config.eventToken()).thenReturn("token");
+        when(bingoClient.backendUrlState()).thenReturn(BackendUrlState.OK);
+
+        plugin.startUp();
+        assertEquals("bad_token", lastStatus().getBackendError());
+
+        when(bingoClient.isConfigured()).thenReturn(false);
+        plugin.onConfigChanged(configChanged("backendUrl"));
+
+        SystemStatus status = lastStatus();
+        assertEquals(SystemStatus.Fetch.NOT_CHECKED, status.getFetch());
+        assertNull(status.getBackendError());
+        assertNull(status.getBoard());
+    }
+
+    /**
+     * The plugin is itself called "Bingo with Dink Notifications", so anything matching Dink
+     * by substring finds this plugin and reports a Dink that is not installed as running.
+     */
+    @Test
+    void theDinkCheckDoesNotMatchThisPluginsOwnName() throws Exception {
+        Plugin self = mock(Plugin.class);
+        when(self.getName()).thenReturn("Bingo with Dink Notifications");
+        doReturn(Collections.singletonList(self)).when(pluginManager).getPlugins();
+        when(pluginManager.isPluginEnabled(self)).thenReturn(true);
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+
+        plugin.startUp();
+
+        assertEquals(SystemStatus.Presence.MISSING, lastStatus().getDink());
+    }
+
+    /** A plugin list that cannot be read is admitted to rather than guessed at. */
+    @Test
+    void anUnreadablePluginListIsReportedAsUnknown() throws Exception {
+        doThrow(new IllegalStateException("not ready")).when(pluginManager).getPlugins();
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+
+        plugin.startUp();
+
+        assertEquals(SystemStatus.Presence.UNKNOWN, lastStatus().getDink());
+        assertEquals(SystemStatus.Presence.UNKNOWN, lastStatus().getLootTracker());
+    }
+
+    /** The panel outlives a restart, so the previous run's verdict must not survive it. */
+    @Test
+    void shuttingDownForgetsTheReport() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Team One"))));
+
+        plugin.startUp();
+        plugin.shutDown();
+
+        verify(panel).resetSystemCheck();
+        // Wired on start-up and cleared on shutdown, so the button cannot reach a plugin that
+        // is no longer running.
+        verify(panel, times(2)).setSystemCheckHandler(any(Runnable.class));
+    }
+
+    private SystemStatus lastStatus() {
+        ArgumentCaptor<SystemStatus> captor = ArgumentCaptor.forClass(SystemStatus.class);
+        verify(panel, atLeastOnce()).renderSystemCheck(captor.capture());
+        return captor.getValue();
+    }
+
+    private static SystemCheck.State rowState(SystemCheck check, String name) {
+        for (SystemCheck.Row row : check.getRows()) {
+            if (row.getName().equals(name)) {
+                return row.getState();
+            }
+        }
+        throw new AssertionError("No row named " + name);
     }
 
     private static BingoBoard board(String team) {

@@ -32,8 +32,6 @@ public final class BingoBoard {
 
     private final Map<Integer, BingoTile> byItemId;
 
-    private final Map<String, BingoTile> byTileId;
-
     /** Logical tile ids this team has not claimed yet. */
     private final Set<String> remaining;
 
@@ -46,11 +44,11 @@ public final class BingoBoard {
         this.eventOpen = eventOpen;
 
         Map<Integer, BingoTile> byItemId = new LinkedHashMap<>();
-        Map<String, BingoTile> byTileId = new LinkedHashMap<>();
+        Set<String> tileIds = new LinkedHashSet<>();
         Set<String> remaining = new LinkedHashSet<>();
         Set<Integer> openItemIds = new LinkedHashSet<>();
         for (BingoTile tile : tiles) {
-            if (byTileId.put(tile.getId(), tile) != null) {
+            if (!tileIds.add(tile.getId())) {
                 throw new IllegalArgumentException("Duplicate tile id: " + tile.getId());
             }
             Set<Integer> credited = new LinkedHashSet<>();
@@ -70,7 +68,6 @@ public final class BingoBoard {
             }
         }
         this.byItemId = Collections.unmodifiableMap(byItemId);
-        this.byTileId = Collections.unmodifiableMap(byTileId);
         this.remaining = Collections.unmodifiableSet(remaining);
         this.openItemIds = Collections.unmodifiableSet(openItemIds);
     }

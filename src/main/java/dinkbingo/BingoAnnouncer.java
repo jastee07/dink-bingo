@@ -75,27 +75,11 @@ public class BingoAnnouncer {
         String itemName = claim.getItemName() != null ? claim.getItemName() : "an item";
         String tileName = claim.getTileName() != null ? claim.getTileName() : itemName;
         String team = claim.getTeam() != null ? claim.getTeam() : "their team";
-        String text = claim.isProgress() ? config.progressMessage() : config.notifyMessage();
-        String title = claim.isProgress() ? "Bingo tile progress" : "Bingo tile completed";
-        post(claim, source, itemName, tileName, team, text, title);
-    }
 
-    private void post(
-        ClaimResponse claim,
-        String source,
-        String itemName,
-        String tileName,
-        String team,
-        String text,
-        String title
-    ) {
-
-        Map<String, Object> data = new HashMap<>();
-        data.put("sourcePlugin", SOURCE_PLUGIN);
-        data.put("text", text);
-        data.put("title", title);
+        Map<String, Object> data = newPayload(
+            claim.isProgress() ? "Bingo tile progress" : "Bingo tile completed",
+            claim.isProgress() ? config.progressMessage() : config.notifyMessage());
         data.put("thumbnail", ITEM_ICON_URL + claim.getItemId() + ".png");
-        data.put("imageRequested", config.sendScreenshot());
 
         Map<String, Object> replacements = new HashMap<>();
         replacements.put("%ITEM%", linkReplacement(itemName, WIKI_SEARCH_URL + urlEncode(itemName)));
@@ -141,10 +125,8 @@ public class BingoAnnouncer {
         metadata.put("complete", claim.isComplete());
         data.put("metadata", metadata);
 
-        applyWebhookOverride(data);
-
         log.info("Announcing bingo {} for {}", claim.isProgress() ? "progress" : "completion", itemName);
-        eventBus.post(new PluginMessage(DINK_NAMESPACE, DINK_NOTIFY, data));
+        send(data);
     }
 
     /**
@@ -159,12 +141,7 @@ public class BingoAnnouncer {
      * the message appearing in Discord; callers must say so rather than report success.
      */
     public void announceTest() {
-        Map<String, Object> data = new HashMap<>();
-        data.put("sourcePlugin", SOURCE_PLUGIN);
-        data.put("text", TEST_TEXT);
-        data.put("title", TEST_TITLE);
-        // Mirrors a real claim so the capture path is what gets verified, not a second one.
-        data.put("imageRequested", config.sendScreenshot());
+        Map<String, Object> data = newPayload(TEST_TITLE, TEST_TEXT);
 
         List<Map<String, Object>> fields = new ArrayList<>(1);
         fields.add(field("Test", "Configuration test \u2014 no tile was claimed and no board "
@@ -175,9 +152,29 @@ public class BingoAnnouncer {
         metadata.put("test", true);
         data.put("metadata", metadata);
 
-        applyWebhookOverride(data);
-
         log.info("Sending Dink test notification");
+        send(data);
+    }
+
+    /**
+     * The part of the payload every notification shares.
+     * <p>
+     * A test deliberately goes through here too: the screenshot flag and the url selection are
+     * the settings most likely to be wrong, so a test that built its own payload would verify
+     * a path nothing else uses.
+     */
+    private Map<String, Object> newPayload(String title, String text) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("sourcePlugin", SOURCE_PLUGIN);
+        data.put("title", title);
+        data.put("text", text);
+        data.put("imageRequested", config.sendScreenshot());
+        return data;
+    }
+
+    /** The one handoff to Dink, so url selection cannot be applied to one payload and not another. */
+    private void send(Map<String, Object> data) {
+        applyWebhookOverride(data);
         eventBus.post(new PluginMessage(DINK_NAMESPACE, DINK_NOTIFY, data));
     }
 
