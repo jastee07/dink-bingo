@@ -132,7 +132,9 @@ Keep `admin_token`, the Sheet URL, and any backend webhook to yourself.
 1. Install **Dink** and **Bingo with Dink Notifications** from the Plugin Hub.
 2. In **Dink** → *External Plugin Requests* → enable **Enable External Plugin Notifications**,
    and make sure a Discord webhook is set.
-3. In **Bingo with Dink Notifications**, paste the **Backend URL** and **Event Token**.
+3. In **Bingo with Dink Notifications**, paste the **Backend URL** and **Event Token**. Setting
+   the URL asks you to confirm: your IP address, RSN, event token, and received items are sent
+   to that server, which is not run by RuneLite.
 4. Confirm the **Loot Tracker** plugin is enabled (it is by default). See below — this matters
    more than it looks.
 5. Press **System check** at the bottom of the sidebar. It checks every link in the chain at

@@ -158,7 +158,7 @@ drop. It is rate limited to one test every 30 seconds.
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| Backend URL | *(blank)* | The HTTPS Apps Script `/exec` URL. **No requests are made until this is set.** |
+| Backend URL | *(blank)* | The HTTPS Apps Script `/exec` URL. **No requests are made until this is set.** Setting it asks for confirmation, because your IP address, RSN, event token, and received items are sent to that server. |
 | Event Token | *(blank)* | The `token` from the sheet's `Config` tab |
 | Refresh Interval | 5 min | How often the board is re-fetched so teammates' claims appear |
 | Board View | Named Tiles | Swap between logical tile names and every possible item still eligible for unfinished tiles |
