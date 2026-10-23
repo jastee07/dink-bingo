@@ -362,6 +362,17 @@ class BingoDetectorTest {
     }
 
     @Test
+    void claimsFromCollectionLogWhenTheItemNameIsColorTagged() {
+        detector.onGameMessage(
+            "New item added to your collection log: <col=ff0000>Dexterous prayer scroll</col>");
+
+        ClaimRequest claim = captureClaim();
+        assertEquals(SCROLL, claim.getItemId());
+        assertEquals("Dexterous prayer scroll", claim.getItemName());
+        assertEquals("Collection log", claim.getSource());
+    }
+
+    @Test
     void claimsAGroupedAlternativeFromCollectionLogByName() {
         detector.setBoard(board(group("rare-drop", "Any rare drop",
             new BingoItem(WHIP, "Abyssal whip"),

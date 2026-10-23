@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
+import net.runelite.client.util.Text;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -152,7 +153,9 @@ public class BingoDetector {
         if (!config.includeCollectionLog() || !bingoClient.isConfigured()) {
             return;
         }
-        Matcher matcher = COLLECTION_LOG_PATTERN.matcher(message);
+        // The game colors the item name (<col=ff0000>…</col>). Strip tags once, the way
+        // RuneLite's screenshot plugin does, then match the plain name the sheet stores.
+        Matcher matcher = COLLECTION_LOG_PATTERN.matcher(Text.removeTags(message));
         if (!matcher.find()) {
             return;
         }
