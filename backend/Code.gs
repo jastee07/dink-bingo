@@ -303,7 +303,7 @@ function handleClaim(body) {
       progressAfter: progress,
       completedTile: complete
     };
-    sheet(SHEET_CLAIMS).appendRow([
+    appendSheetRow(sheet(SHEET_CLAIMS), [
       contribution.team,
       contribution.tileId,
       contribution.tileName,
@@ -363,7 +363,7 @@ function handleUnclaim(params) {
 
   try {
     var sh = sheet(SHEET_CLAIMS);
-    var values = sh.getDataRange().getValues();
+    var values = textValues(sh.getDataRange().getValues());
     var columns = requireColumns(values[0], SHEET_CLAIMS, ['team', 'tile_id', 'item_id']);
     var removed = 0;
     for (var r = values.length - 1; r >= 1; r--) {
@@ -417,6 +417,58 @@ function sheet(name) {
   var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
   if (!sh) throw new Error('missing sheet tab: ' + name);
   return sh;
+}
+
+// Sheets evaluates a cell whose first character is one of these.
+var FORMULA_PREFIX = '=+-@';
+
+/**
+ * Append a row with caller-controlled strings stored as text.
+ *
+ * A participant who knows the event token can send source, claimId, itemName, or rsn
+ * starting with =, +, -, or @. appendRow would store that as a formula in the organizer's
+ * spreadsheet, which also holds admin_token. A leading apostrophe is Sheets' text marker:
+ * the cell is not evaluated, and getValues() returns the original characters, so a claim id
+ * still matches on replay. Dates, numbers, and booleans are left alone so timestamps and
+ * progress stay typed. Legitimate text such as an NPC name or "Collection log" is unchanged.
+ *
+ * Claims, Attempts, and Audit all append through here. That is the only write of a
+ * participant-controlled cell.
+ */
+function appendSheetRow(sh, values) {
+  var row = [];
+  for (var i = 0; i < values.length; i++) row.push(sheetText(values[i]));
+  sh.appendRow(row);
+}
+
+function sheetText(value) {
+  if (typeof value !== 'string' || value.length === 0) return value;
+  if (FORMULA_PREFIX.indexOf(value.charAt(0)) !== -1) return "'" + value;
+  return value;
+}
+
+/**
+ * Drop a leading text marker when getValues() has preserved it.
+ *
+ * Sheets normally omits the marker, so this is a no-op and the stored claim id matches the
+ * request. Stripping a marker that did come back keeps replay on the characters the client
+ * sent either way.
+ */
+function readSheetText(value) {
+  if (typeof value !== 'string' || value.length < 2 || value.charAt(0) !== "'") return value;
+  if (FORMULA_PREFIX.indexOf(value.charAt(1)) === -1) return value;
+  return value.substring(1);
+}
+
+function textValues(values) {
+  var out = [];
+  for (var r = 0; r < values.length; r++) {
+    var row = values[r];
+    var copy = [];
+    for (var c = 0; c < row.length; c++) copy.push(readSheetText(row[c]));
+    out.push(copy);
+  }
+  return out;
 }
 
 /**
@@ -552,7 +604,7 @@ function findOption(tile, itemId) {
  * rows that fail validation.
  */
 function readClaims(catalog) {
-  var values = sheet(SHEET_CLAIMS).getDataRange().getValues();
+  var values = textValues(sheet(SHEET_CLAIMS).getDataRange().getValues());
   var columns = requireColumns(values[0], SHEET_CLAIMS,
     ['team', 'tile_id', 'tile_name', 'item_id', 'item_name', 'rsn', 'claimed_at',
       'claim_id', 'source', 'progress_after', 'completed_tile']);
@@ -601,7 +653,7 @@ function readClaims(catalog) {
 function readAttempts() {
   var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_ATTEMPTS);
   if (!sh) return null;
-  var values = sh.getDataRange().getValues();
+  var values = textValues(sh.getDataRange().getValues());
   var columns = headerMap(values[0] || []);
   if (columns.claim_id == null || columns.status == null) return null;
 
@@ -635,7 +687,7 @@ function readAttempts() {
 function recordAttempt(attempts, claimId, fields) {
   if (attempts === null || !claimId || attempts[claimId]) return;
   try {
-    sheet(SHEET_ATTEMPTS).appendRow([
+    appendSheetRow(sheet(SHEET_ATTEMPTS), [
       claimId,
       fields.rsn || '',
       fields.team || '',
@@ -972,7 +1024,7 @@ function audit(rsn, itemId, result, payload, notes) {
 /** Append an audit row while the caller already holds the script lock. */
 function auditLocked(rsn, itemId, result, payload, notes) {
   try {
-    sheet(SHEET_AUDIT).appendRow([
+    appendSheetRow(sheet(SHEET_AUDIT), [
       new Date(),
       rsn || '',
       itemId == null ? '' : itemId,

@@ -39,11 +39,22 @@ const sheetReadsUnderLock = [];
 // Rejected-auth diagnostics live here instead of the Audit tab; see noteRejectedAuth.
 const scriptCache = {};
 
+// Sheets treats a leading apostrophe in front of =, +, -, or @ as a text marker, not as
+// cell content. Keep this prefix list in sync with FORMULA_PREFIX in Code.gs. The raw row
+// in `sheets` keeps the marker (so a test can see the cell was stored as text). getValues()
+// returns the original characters, which is what replay compares.
+function sheetCellValue(cell) {
+  if (typeof cell === "string" && cell.charAt(0) === "'" && "=+-@".indexOf(cell.charAt(1)) !== -1) {
+    return cell.slice(1);
+  }
+  return cell;
+}
+
 function fakeSheet(name) {
   return {
     getDataRange() {
       if (lockDepth > 0) sheetReadsUnderLock.push(name);
-      return { getValues: () => sheets[name].map(row => row.slice()) };
+      return { getValues: () => sheets[name].map(row => row.map(sheetCellValue)) };
     },
     appendRow(row) {
       sheets[name].push(row.slice());
@@ -1457,6 +1468,202 @@ assert.strictEqual(itemDuplicate.duplicateReason, "item_recorded");
 
 Object.keys(rejectClaimSnapshot).forEach(name => {
   sheets[name] = rejectClaimSnapshot[name];
+});
+
+// ---------------------------------------------------------------------------
+// Caller-controlled cells are stored as text, never as formulas (#59).
+//
+// The event token is enough to send source, claimId, itemName, or rsn starting with
+// =, +, -, or @. Those cells share a spreadsheet with admin_token. The raw row keeps
+// Sheets' leading apostrophe; getValues() (and therefore replay) sees the original text.
+// ---------------------------------------------------------------------------
+
+const formulaSnapshot = ["Items", "Teams", "Claims", "Audit", "Attempts"].reduce((saved, name) => {
+  saved[name] = sheets[name].map(row => row.slice());
+  return saved;
+}, {});
+
+sheets.Items = [
+  ["tile_id", "tile_name", "item_id", "item_name", "points", "required_count", "notes"],
+  ["rare-drop", "Any rare drop", 4151, "Abyssal whip", 3, 1, ""],
+  ["11832", "Bandos chestplate", 11832, "Bandos chestplate", 1, 1, ""]
+];
+sheets.Teams = [["rsn", "team"], ["jake", "Team One"]];
+sheets.Claims = [formulaSnapshot.Claims[0].slice()];
+sheets.Attempts = [formulaSnapshot.Attempts[0].slice()];
+sheets.Audit = [formulaSnapshot.Audit[0].slice()];
+
+["Collection log", "General Graardor", "Nex", "Abyssal demon"].forEach(source => {
+  assert.strictEqual(context.sheetText(source), source, source + " must be stored unchanged");
+});
+["=", "+", "-", "@"].forEach(prefix => {
+  const value = prefix + '1+1';
+  assert.strictEqual(context.sheetText(value), "'" + value);
+  assert.strictEqual(
+    context.readSheetText("'" + value),
+    value,
+    "a preserved text marker still matches the claim id"
+  );
+  assert.strictEqual(
+    context.readSheetText(value),
+    value,
+    "a marker Sheets already consumed still matches the claim id"
+  );
+});
+assert.strictEqual(context.sheetText(4151), 4151);
+assert.strictEqual(context.sheetText(""), "");
+assert.strictEqual(context.readSheetText("'Collection log"), "'Collection log");
+
+const claimColumns = sheets.Claims[0];
+const attemptColumns = sheets.Attempts[0];
+const claimIdColumn = claimColumns.indexOf("claim_id");
+const sourceColumn = claimColumns.indexOf("source");
+const claimItemColumn = claimColumns.indexOf("item_name");
+const attemptClaimColumn = attemptColumns.indexOf("claim_id");
+const attemptRsnColumn = attemptColumns.indexOf("rsn");
+const attemptItemColumn = attemptColumns.indexOf("item_name");
+
+const collection = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 11832,
+  itemName: "Bandos chestplate",
+  source: "Collection log",
+  claimId: "collection-log-1"
+}));
+assert.strictEqual(collection.status, "claimed");
+assert.strictEqual(sheets.Claims[1][sourceColumn], "Collection log");
+assert.strictEqual(sheets.Claims[1][claimIdColumn], "collection-log-1");
+assert.strictEqual(sheets.Claims[1][claimItemColumn], "Bandos chestplate");
+const collectionReplay = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 11832,
+  claimId: "collection-log-1"
+}));
+assert.strictEqual(collectionReplay.replay, true);
+assert.strictEqual(sheets.Claims.length, 2, "a normal claim id still replays from the sheet");
+
+const formulaSource = '=IMPORTDATA("https://example.invalid/sheet")';
+const formulaClaimId = "+1+1";
+const accepted = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  source: formulaSource,
+  claimId: formulaClaimId,
+  admin_token: "organizer-secret",
+  discord_webhook: "https://discord.invalid/webhook"
+}));
+assert.strictEqual(accepted.status, "claimed");
+assert.strictEqual(sheets.Claims[2][claimIdColumn], "'" + formulaClaimId);
+assert.strictEqual(sheets.Claims[2][sourceColumn], "'" + formulaSource);
+assert.strictEqual(sheets.Claims[2][claimItemColumn], "Abyssal whip");
+const acceptedAudit = sheets.Audit[sheets.Audit.length - 1];
+const acceptedPayload = JSON.parse(acceptedAudit[5]);
+assert.strictEqual(acceptedPayload.source, formulaSource);
+assert.strictEqual(acceptedPayload.claimId, formulaClaimId);
+assert.strictEqual(acceptedPayload.token, undefined);
+assert.strictEqual(acceptedPayload.admin_token, undefined);
+assert.strictEqual(acceptedPayload.discord_webhook, undefined);
+assert(!acceptedAudit[5].includes("participant-secret"));
+assert(!acceptedAudit[5].includes("organizer-secret"));
+assert(!acceptedAudit[5].includes("discord"));
+assert.strictEqual(acceptedAudit[5].charAt(0), "{", "audit JSON itself must not be a formula");
+const formulaReplay = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  source: formulaSource,
+  claimId: formulaClaimId
+}));
+assert.strictEqual(formulaReplay.status, "claimed");
+assert.strictEqual(formulaReplay.replay, true);
+assert.strictEqual(sheets.Claims.length, 3, "a formula-shaped claim id must replay, not claim twice");
+assert.strictEqual(sheets.Audit.length, 3, "an accepted replay writes no second audit row");
+
+const attemptSource = "@SUM(A1)";
+const attemptClaimId = "-1+1";
+const attemptItemName = "@Coins";
+const offBoard = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 995,
+  itemName: attemptItemName,
+  source: attemptSource,
+  claimId: attemptClaimId,
+  admin_token: "organizer-secret",
+  discord_webhook: "https://discord.invalid/webhook"
+}));
+assert.strictEqual(offBoard.status, "not_on_board");
+const attemptRow = sheets.Attempts[sheets.Attempts.length - 1];
+assert.strictEqual(attemptRow[attemptClaimColumn], "'" + attemptClaimId);
+assert.strictEqual(attemptRow[attemptColumns.indexOf("status")], "not_on_board");
+assert.strictEqual(attemptRow[attemptItemColumn], "'" + attemptItemName);
+const offBoardAudit = sheets.Audit[sheets.Audit.length - 1];
+assert.strictEqual(offBoardAudit[3], "not_on_board");
+const offBoardPayload = JSON.parse(offBoardAudit[5]);
+assert.strictEqual(offBoardPayload.source, attemptSource);
+assert.strictEqual(offBoardPayload.claimId, attemptClaimId);
+assert.strictEqual(offBoardPayload.token, undefined);
+assert.strictEqual(offBoardPayload.admin_token, undefined);
+assert.strictEqual(offBoardPayload.discord_webhook, undefined);
+assert(!offBoardAudit[5].includes("participant-secret"));
+assert(!offBoardAudit[5].includes("organizer-secret"));
+assert(!offBoardAudit[5].includes("discord"));
+assert(!JSON.stringify(attemptRow).includes("participant-secret"));
+assert(!JSON.stringify(attemptRow).includes("organizer-secret"));
+const offBoardReplay = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: "Jake",
+  itemId: 995,
+  itemName: attemptItemName,
+  source: attemptSource,
+  claimId: attemptClaimId
+}));
+assert.strictEqual(offBoardReplay.status, "not_on_board");
+assert.strictEqual(offBoardReplay.replay, true);
+assert.strictEqual(offBoardReplay.itemName, attemptItemName);
+assert.strictEqual(sheets.Attempts.length, 2, "a formula-shaped rejection claim id must replay");
+
+const formulaRsn = '=IMPORTRANGE("https://docs.google.com/spreadsheets/d/x","Config!A1")';
+const rsnRejection = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: formulaRsn,
+  itemId: 4151,
+  itemName: "Abyssal whip",
+  source: "General Graardor",
+  claimId: "formula-rsn-1"
+}));
+assert.strictEqual(rsnRejection.status, "not_on_team");
+const rsnAttempt = sheets.Attempts[sheets.Attempts.length - 1];
+assert.strictEqual(rsnAttempt[attemptClaimColumn], "formula-rsn-1");
+assert.strictEqual(rsnAttempt[attemptRsnColumn], "'" + formulaRsn.toLowerCase());
+const rsnAudit = sheets.Audit[sheets.Audit.length - 1];
+assert.strictEqual(rsnAudit[1], "'" + formulaRsn.toLowerCase());
+const rsnPayload = JSON.parse(rsnAudit[5]);
+assert.strictEqual(rsnPayload.source, "General Graardor");
+assert.strictEqual(rsnPayload.rsn, formulaRsn);
+assert(!rsnAudit[5].includes("participant-secret"));
+const rsnReplay = output(context.handleClaim({
+  token: "participant-secret",
+  rsn: formulaRsn,
+  itemId: 4151,
+  claimId: "formula-rsn-1"
+}));
+assert.strictEqual(rsnReplay.status, "not_on_team");
+assert.strictEqual(rsnReplay.replay, true);
+
+assert(!code.includes("sheet(SHEET_CLAIMS).appendRow"));
+assert(!code.includes("sheet(SHEET_ATTEMPTS).appendRow"));
+assert(!code.includes("sheet(SHEET_AUDIT).appendRow"));
+assert(!/\bUrlFetchApp\s*\./.test(code), "the backend must not call UrlFetchApp");
+assert.strictEqual(lockDepth, 0, "the formula-text paths released the script lock");
+
+Object.keys(formulaSnapshot).forEach(name => {
+  sheets[name] = formulaSnapshot[name];
 });
 
 console.log("Apps Script grouped-tile and security tests passed");
