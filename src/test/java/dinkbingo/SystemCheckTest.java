@@ -52,6 +52,26 @@ class SystemCheckTest {
         assertEquals(SystemCheck.State.NOT_CHECKED, row(check, "Backend version").getState());
     }
 
+    /**
+     * A missing player name or item id is a claim this deployment understood. Reporting it
+     * as a version problem sends the player to redeploy a script that is already current.
+     */
+    @Test
+    void aMissingPlayerNameOrItemIdIsNotAnOutOfDateDeployment() {
+        SystemCheck check = SystemCheck.evaluate(ready()
+            .fetch(SystemStatus.Fetch.REJECTED)
+            .backendError("bad_request")
+            .build());
+
+        assertEquals(SystemCheck.State.NOT_CHECKED, row(check, "Backend version").getState());
+        SystemCheck.Row backend = row(check, "Backend");
+        assertEquals(SystemCheck.State.WARNING, backend.getState());
+        assertTrue(backend.getAction().contains("player name"), backend.getAction());
+        assertTrue(backend.getAction().contains("item id"), backend.getAction());
+        assertFalse(backend.getAction().contains("re-deploy"), backend.getAction());
+        assertFalse(backend.getAction().toLowerCase().contains("out of date"), backend.getAction());
+    }
+
     /** An Apps Script left on an old copy of Code.gs, which reads as a broken token otherwise. */
     @Test
     void aDeploymentThatDoesNotUnderstandTheRequestIsReportedAsAVersionProblem() {
