@@ -51,6 +51,21 @@ public final class SystemStatus {
         RUNNING
     }
 
+    /**
+     * What the Bingo Webhook Override will do to the next announcement.
+     * <p>
+     * The URL itself is not stored on this snapshot. It is a secret, and the readiness
+     * report is drawn from here.
+     */
+    public enum WebhookOverride {
+        /** Nothing configured, so Dink selects the channel. */
+        UNSET,
+        /** At least one HTTPS url will be handed to Dink. */
+        SET,
+        /** Configured, but nothing in it is an HTTPS url, so Dink selects the channel. */
+        IGNORED
+    }
+
     @Builder.Default
     private final BackendUrlState backendUrl = BackendUrlState.UNSET;
 
@@ -81,4 +96,7 @@ public final class SystemStatus {
 
     @Builder.Default
     private final Presence lootTracker = Presence.UNKNOWN;
+
+    @Builder.Default
+    private final WebhookOverride webhookOverride = WebhookOverride.UNSET;
 }

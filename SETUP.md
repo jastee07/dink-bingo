@@ -180,6 +180,7 @@ one link in that chain.
 | Board | Loaded and live | On screen but no longer refreshing |
 | Claim detection | Drops are being submitted | Suspended after the backend refused a refresh |
 | Dink | Installed and switched on | Missing or off — tiles still count, but nothing is announced |
+| Webhook override | Not set, or a valid HTTPS webhook | Set, but nothing in it is HTTPS, so Dink's own channel is used |
 | Loot Tracker | Installed and switched on | Off, so chest and casket drops are not seen at all |
 
 Every warning and problem carries a one-line fix, and the headline sits on the button itself, so
@@ -216,7 +217,9 @@ labelled a test:
 The chat line stops at *handed to Dink* on purpose. **Seeing the message in Discord is the
 verification** — nothing else confirms delivery. Be logged in if you want to check the
 screenshot, and point the override at a throwaway channel if you would rather not post in the
-event's own.
+event's own. If the override is not a valid HTTPS URL, the line under the button says it was
+not used: the test still goes out, on Dink's own webhook. An empty override leaves that choice
+to Dink, and the line does not mention it.
 
 ---
 

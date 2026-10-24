@@ -5,12 +5,14 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.events.PluginMessage;
 import okhttp3.HttpUrl;
+import org.jetbrains.annotations.Nullable;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -183,12 +185,30 @@ public class BingoAnnouncer {
      * primary url in charge otherwise.
      * <p>
      * Dink rejects the whole request unless every element is an okhttp3.HttpUrl, and a
-     * non-HTTPS webhook is dropped rather than sent in the clear.
+     * non-HTTPS webhook is dropped rather than sent in the clear. The configured value is
+     * a secret, so it is never written to the log.
      */
     private void applyWebhookOverride(Map<String, Object> data) {
-        String webhook = config.bingoWebhook().trim();
+        List<HttpUrl> urls = webhookUrls(config.bingoWebhook());
+        if (!urls.isEmpty()) {
+            data.put("urls", urls);
+        }
+    }
+
+    /**
+     * HTTPS urls from the Bingo Webhook Override, in the order they were written.
+     * <p>
+     * Blank, unparseable, and non-HTTPS lines are dropped. An empty result means Dink keeps
+     * its own webhook, either because nothing was configured or because none of what was
+     * configured can be sent. Callers tell those two apart: only the second is a surprise.
+     */
+    static List<HttpUrl> webhookUrls(@Nullable String configured) {
+        if (configured == null) {
+            return Collections.emptyList();
+        }
+        String webhook = configured.trim();
         if (webhook.isEmpty()) {
-            return;
+            return Collections.emptyList();
         }
         List<HttpUrl> urls = new ArrayList<>();
         for (String candidate : webhook.split("\n")) {
@@ -197,9 +217,20 @@ public class BingoAnnouncer {
                 urls.add(url);
             }
         }
-        if (!urls.isEmpty()) {
-            data.put("urls", urls);
-        }
+        return urls;
+    }
+
+    /**
+     * Whether the player typed an override that will not be sent.
+     * <p>
+     * An empty field is not this: it leaves the channel to Dink on purpose. A non-empty
+     * field that yields no HTTPS url is, because the player believes bingo is going to the
+     * channel they typed.
+     */
+    static boolean webhookOverrideIgnored(@Nullable String configured) {
+        return configured != null
+            && !configured.trim().isEmpty()
+            && webhookUrls(configured).isEmpty();
     }
 
     // ------------------------------------------------------------------

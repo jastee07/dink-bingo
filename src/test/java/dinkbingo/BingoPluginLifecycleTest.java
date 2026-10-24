@@ -553,6 +553,46 @@ class BingoPluginLifecycleTest {
         assertTrue(message.contains("check Discord"), message);
     }
 
+    /**
+     * A non-HTTPS or unparseable override is not sent. The test still posts, because Dink's
+     * own webhook is what will be used, and the status line is what says the override was not.
+     */
+    @Test
+    void anUnusableWebhookOverrideIsReportedAndNamedOnTheTestLine() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Current Team"))));
+        when(config.bingoWebhook()).thenReturn("not a url");
+
+        plugin.startUp();
+        assertEquals(SystemStatus.WebhookOverride.IGNORED, lastStatus().getWebhookOverride());
+
+        runTestHandler();
+
+        verify(panel).noteTestOverrideUnused();
+        verify(announcer).announceTest();
+        verify(bingoClient, never()).submitClaim(any());
+    }
+
+    /** An empty field, and a valid HTTPS one, both leave the test line unchanged. */
+    @Test
+    void anEmptyOrHttpsOverrideDoesNotSayTheOverrideWasDropped() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Current Team"))));
+        when(config.bingoWebhook()).thenReturn("  ");
+
+        plugin.startUp();
+        assertEquals(SystemStatus.WebhookOverride.UNSET, lastStatus().getWebhookOverride());
+        runTestHandler();
+
+        when(config.bingoWebhook()).thenReturn("https://discord.com/api/webhooks/a/b");
+        plugin.onConfigChanged(configChanged("bingoWebhook"));
+        assertEquals(SystemStatus.WebhookOverride.SET, lastStatus().getWebhookOverride());
+        runTestHandler();
+
+        verify(panel, never()).noteTestOverrideUnused();
+        verify(announcer, times(2)).announceTest();
+    }
+
     /** A test queued after the plugin stopped has nothing left to announce. */
     @Test
     void theDinkTestIsIgnoredAfterShutdown() throws Exception {

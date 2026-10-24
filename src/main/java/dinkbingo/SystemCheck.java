@@ -104,7 +104,7 @@ public final class SystemCheck {
      * token is not worth reading while the URL is still unset.
      */
     public static SystemCheck evaluate(SystemStatus status) {
-        List<Row> rows = new ArrayList<>(11);
+        List<Row> rows = new ArrayList<>(12);
         rows.add(backendUrlRow(status));
         rows.add(backendRow(status));
         rows.add(tokenRow(status));
@@ -115,6 +115,7 @@ public final class SystemCheck {
         rows.add(boardRow(status));
         rows.add(detectionRow(status));
         rows.add(dinkRow(status));
+        rows.add(webhookRow(status));
         rows.add(lootTrackerRow(status));
         return new SystemCheck(rows);
     }
@@ -366,6 +367,25 @@ public final class SystemCheck {
                         + "but nothing is announced.");
             default:
                 return Row.notChecked("Dink", "Not checked");
+        }
+    }
+
+    /**
+     * An empty override leaves the channel to Dink, which is the normal setup. A non-empty
+     * one that produces no HTTPS url is dropped, and without this row the player believes
+     * bingo is going to the channel they typed.
+     */
+    private static Row webhookRow(SystemStatus status) {
+        switch (status.getWebhookOverride()) {
+            case SET:
+                return Row.ready("Webhook override", "Will be used");
+            case IGNORED:
+                return Row.warning("Webhook override", "Will not be used",
+                    "Nothing in Bingo Webhook Override is an HTTPS URL, so Dink uses its own "
+                        + "webhook. Paste an https:// Discord webhook, or clear the field.");
+            case UNSET:
+            default:
+                return Row.ready("Webhook override", "Not set — Dink chooses the channel");
         }
     }
 

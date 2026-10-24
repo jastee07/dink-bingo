@@ -421,6 +421,11 @@ public class BingoPlugin extends Plugin {
             || "hideCompletedTiles".equals(event.getKey())) && boardLoaded) {
             renderBoard(currentBoard, true);
         }
+        if ("bingoWebhook".equals(event.getKey())) {
+            // The report is what tells the player an override will not be used, so it has to
+            // move with the setting rather than wait for the next board fetch.
+            publishSystemStatus();
+        }
     }
 
     private void renderBoard(BingoBoard board, boolean configured) {
@@ -531,7 +536,21 @@ public class BingoPlugin extends Plugin {
             .detectionEnabled(detector.isDetectionEnabled())
             .dink(presenceOf(DINK_NAME, DINK_PACKAGE))
             .lootTracker(presenceOf(LOOT_TRACKER_NAME, null))
+            .webhookOverride(webhookOverride(config.bingoWebhook()))
             .build();
+    }
+
+    /**
+     * Classifies the override with the same parser the announcer uses to build {@code urls},
+     * so the report cannot disagree with what is actually sent.
+     */
+    private static SystemStatus.WebhookOverride webhookOverride(@Nullable String configured) {
+        if (BingoAnnouncer.webhookOverrideIgnored(configured)) {
+            return SystemStatus.WebhookOverride.IGNORED;
+        }
+        return BingoAnnouncer.webhookUrls(configured).isEmpty()
+            ? SystemStatus.WebhookOverride.UNSET
+            : SystemStatus.WebhookOverride.SET;
     }
 
     /**
@@ -595,6 +614,12 @@ public class BingoPlugin extends Plugin {
     private void sendDinkTest() {
         if (!active) {
             return;
+        }
+        // On this thread, which is the event dispatch thread the button runs on. The label
+        // is owned there, and the player needs to see it whether or not the client-thread
+        // post below is still current when it runs.
+        if (BingoAnnouncer.webhookOverrideIgnored(config.bingoWebhook())) {
+            panel.noteTestOverrideUnused();
         }
         onClientThread(() -> {
             announcer.announceTest();
