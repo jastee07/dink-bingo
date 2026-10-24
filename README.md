@@ -271,6 +271,8 @@ participant. The mitigations are visibility and reversibility:
 - Contributions additionally send item id/name, loot source, and a random claim id.
 - No RuneLite account hash is collected.
 - `Audit` stores only allowlisted operational fields; tokens and webhook URLs are redacted.
+- Request strings are stored as text. A loot source, claim id, item name, or RSN starting
+  with `=`, `+`, `-`, or `@` cannot run as a formula in the organizer's spreadsheet.
 - `admin_token` is organizer-only and enables item-level or whole-tile unclaim.
 - The backend holds no webhook and makes no outbound requests; a player's Dink webhook
   remains in their own secret RuneLite configuration.

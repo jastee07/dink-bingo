@@ -282,6 +282,8 @@ board lookup or claim. The mitigations are visibility and reversibility:
 - `Claims` records each distinct contribution's logical tile, actual item, normalized RSN,
   source, claim id, progress-after value, completion flag, and timestamp; it does not receive
   a RuneLite account hash.
+- Request strings are stored as text. A `source`, `claimId`, `itemName`, or `rsn` that starts
+  with `=`, `+`, `-`, or `@` cannot run as a formula in this spreadsheet.
 - `admin_token` is organizer-only and enables item-level or whole-tile unclaim.
 - The backend holds no webhook and makes no outbound requests. Discord delivery belongs
   entirely to each player's own Dink configuration.
