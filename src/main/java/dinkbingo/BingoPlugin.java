@@ -421,6 +421,11 @@ public class BingoPlugin extends Plugin {
             || "hideCompletedTiles".equals(event.getKey())) && boardLoaded) {
             renderBoard(currentBoard, true);
         }
+        if ("bingoWebhook".equals(event.getKey())) {
+            // The report is what tells the player an override will not be used, so it has to
+            // move with the setting rather than wait for the next board fetch.
+            publishSystemStatus();
+        }
     }
 
     private void renderBoard(BingoBoard board, boolean configured) {
@@ -531,7 +536,21 @@ public class BingoPlugin extends Plugin {
             .detectionEnabled(detector.isDetectionEnabled())
             .dink(presenceOf(DINK_NAME, DINK_PACKAGE))
             .lootTracker(presenceOf(LOOT_TRACKER_NAME, null))
+            .webhookOverride(webhookOverride(config.bingoWebhook()))
             .build();
+    }
+
+    /**
+     * Classifies the override with the same parser the announcer uses to build {@code urls},
+     * so the report cannot disagree with what is actually sent.
+     */
+    private static SystemStatus.WebhookOverride webhookOverride(@Nullable String configured) {
+        if (BingoAnnouncer.webhookOverrideIgnored(configured)) {
+            return SystemStatus.WebhookOverride.IGNORED;
+        }
+        return BingoAnnouncer.webhookUrls(configured).isEmpty()
+            ? SystemStatus.WebhookOverride.UNSET
+            : SystemStatus.WebhookOverride.SET;
     }
 
     /**
@@ -586,15 +605,28 @@ public class BingoPlugin extends Plugin {
      * The chat line stops at "handed to Dink" on purpose. Nothing acknowledges the message,
      * so claiming delivery here would rebuild the false confidence this feature exists to
      * remove.
+     * <p>
+     * Posted on the client thread, the same hop a real claim takes. Dink reads the client
+     * on the thread that delivered the message and only moves to the client thread for the
+     * screenshot, so a test posted from the button would read the client off the thread
+     * that owns it.
      */
     private void sendDinkTest() {
         if (!active) {
             return;
         }
-        announcer.announceTest();
-        onClientThread(() -> sendChatMessage(
-            "Bingo: test notification handed to Dink. Dink does not confirm delivery "
-                + "\u2014 check Discord to be sure it arrived."));
+        // On this thread, which is the event dispatch thread the button runs on. The label
+        // is owned there, and the player needs to see it whether or not the client-thread
+        // post below is still current when it runs.
+        if (BingoAnnouncer.webhookOverrideIgnored(config.bingoWebhook())) {
+            panel.noteTestOverrideUnused();
+        }
+        onClientThread(() -> {
+            announcer.announceTest();
+            sendChatMessage(
+                "Bingo: test notification handed to Dink. Dink does not confirm delivery "
+                    + "\u2014 check Discord to be sure it arrived.");
+        });
     }
 
     // ------------------------------------------------------------------

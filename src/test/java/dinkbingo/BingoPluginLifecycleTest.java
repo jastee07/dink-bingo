@@ -19,12 +19,16 @@ import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -549,6 +553,46 @@ class BingoPluginLifecycleTest {
         assertTrue(message.contains("check Discord"), message);
     }
 
+    /**
+     * A non-HTTPS or unparseable override is not sent. The test still posts, because Dink's
+     * own webhook is what will be used, and the status line is what says the override was not.
+     */
+    @Test
+    void anUnusableWebhookOverrideIsReportedAndNamedOnTheTestLine() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Current Team"))));
+        when(config.bingoWebhook()).thenReturn("not a url");
+
+        plugin.startUp();
+        assertEquals(SystemStatus.WebhookOverride.IGNORED, lastStatus().getWebhookOverride());
+
+        runTestHandler();
+
+        verify(panel).noteTestOverrideUnused();
+        verify(announcer).announceTest();
+        verify(bingoClient, never()).submitClaim(any());
+    }
+
+    /** An empty field, and a valid HTTPS one, both leave the test line unchanged. */
+    @Test
+    void anEmptyOrHttpsOverrideDoesNotSayTheOverrideWasDropped() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Current Team"))));
+        when(config.bingoWebhook()).thenReturn("  ");
+
+        plugin.startUp();
+        assertEquals(SystemStatus.WebhookOverride.UNSET, lastStatus().getWebhookOverride());
+        runTestHandler();
+
+        when(config.bingoWebhook()).thenReturn("https://discord.com/api/webhooks/a/b");
+        plugin.onConfigChanged(configChanged("bingoWebhook"));
+        assertEquals(SystemStatus.WebhookOverride.SET, lastStatus().getWebhookOverride());
+        runTestHandler();
+
+        verify(panel, never()).noteTestOverrideUnused();
+        verify(announcer, times(2)).announceTest();
+    }
+
     /** A test queued after the plugin stopped has nothing left to announce. */
     @Test
     void theDinkTestIsIgnoredAfterShutdown() throws Exception {
@@ -561,6 +605,51 @@ class BingoPluginLifecycleTest {
         testHandler.run();
 
         verify(announcer, never()).announceTest();
+        verify(chatMessageManager, never()).queue(any());
+    }
+
+    /**
+     * Dink reads the client on the thread that delivered the external message. The button
+     * runs on the event dispatch thread, so the post has to be the runnable handed to the
+     * client thread, not work done by the handler that queued it.
+     */
+    @Test
+    void theDinkTestIsPostedOnTheClientThread() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Current Team"))));
+
+        plugin.startUp();
+
+        List<Runnable> queued = new ArrayList<>();
+        doAnswer(invocation -> {
+            queued.add(invocation.getArgument(0));
+            return null;
+        }).when(clientThread).invokeLater(any(Runnable.class));
+
+        AtomicReference<Thread> postedOn = new AtomicReference<>();
+        doAnswer(invocation -> {
+            postedOn.set(Thread.currentThread());
+            return null;
+        }).when(announcer).announceTest();
+
+        Thread caller = Thread.currentThread();
+        runTestHandler();
+
+        verify(announcer, never()).announceTest();
+        verify(chatMessageManager, never()).queue(any());
+        assertEquals(1, queued.size(), "the test hops to the client thread exactly once");
+
+        Thread client = new Thread(queued.get(0), "client-thread");
+        client.start();
+        client.join();
+
+        verify(announcer).announceTest();
+        assertNotSame(caller, postedOn.get());
+        assertEquals("client-thread", postedOn.get().getName());
+
+        ArgumentCaptor<QueuedMessage> captor = ArgumentCaptor.forClass(QueuedMessage.class);
+        verify(chatMessageManager).queue(captor.capture());
+        assertTrue(captor.getValue().getRuneLiteFormattedMessage().contains("handed to Dink"));
     }
 
     private void runTestHandler() {

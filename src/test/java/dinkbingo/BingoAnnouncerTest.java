@@ -1,6 +1,10 @@
 package dinkbingo;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import dinkbingo.BingoResponses.ClaimResponse;
+import net.runelite.client.config.ConfigItem;
 import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.events.PluginMessage;
 import okhttp3.HttpUrl;
@@ -9,12 +13,14 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
@@ -301,6 +307,88 @@ class BingoAnnouncerTest {
         when(config.bingoWebhook()).thenReturn("http://example.com/webhook");
         announcer.announceTest();
         assertFalse(capture().getData().containsKey("urls"));
+    }
+
+    /**
+     * An empty field leaves the channel to Dink. A non-empty field is ignored only when
+     * none of its lines survive as an HTTPS url, which is the case the player has to be
+     * told about.
+     */
+    @Test
+    void webhookOverrideIgnoredOnlyWhenNothingHttpsRemains() {
+        assertFalse(BingoAnnouncer.webhookOverrideIgnored(null));
+        assertFalse(BingoAnnouncer.webhookOverrideIgnored(""));
+        assertFalse(BingoAnnouncer.webhookOverrideIgnored("  \n  "));
+        assertFalse(BingoAnnouncer.webhookOverrideIgnored("https://discord.com/api/webhooks/a/b"));
+        assertFalse(BingoAnnouncer.webhookOverrideIgnored(
+            "http://example.com/nope\nhttps://discord.com/api/webhooks/a/b"));
+        assertTrue(BingoAnnouncer.webhookOverrideIgnored("http://example.com/webhook"));
+        assertTrue(BingoAnnouncer.webhookOverrideIgnored("not a url"));
+        assertTrue(BingoAnnouncer.webhookOverrideIgnored("http://a.example\nnot-a-url"));
+    }
+
+    /** A usable line is still sent when a neighbour is not, and only as an HttpUrl. */
+    @Test
+    void keepsTheHttpsLineOfAMixedOverride() {
+        when(config.bingoWebhook()).thenReturn(
+            "not a url\nhttps://discord.com/api/webhooks/a/b\nhttp://example.com/webhook");
+
+        announcer.announce(claim(BingoResponses.CLAIMED), "Abyssal demon");
+
+        Object urls = capture().getData().get("urls");
+        assertTrue(urls instanceof List);
+        assertEquals(1, ((List<?>) urls).size());
+        Object url = ((List<?>) urls).get(0);
+        assertTrue(url instanceof HttpUrl);
+        assertEquals("https://discord.com/api/webhooks/a/b", url.toString());
+    }
+
+    /**
+     * The override is a webhook secret. It is handed to Dink as an HttpUrl and must not
+     * also be written to the log, which is the file a player pastes when they are stuck.
+     */
+    @Test
+    void aValidOverrideIsSentAsHttpUrlsAndNotLogged() {
+        String secret = "https://discord.com/api/webhooks/a/b";
+        when(config.bingoWebhook()).thenReturn(secret);
+        Logger logger = (Logger) LoggerFactory.getLogger(BingoAnnouncer.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            announcer.announce(claim(BingoResponses.CLAIMED), "Abyssal demon");
+            announcer.announceTest();
+
+            ArgumentCaptor<PluginMessage> captor = ArgumentCaptor.forClass(PluginMessage.class);
+            verify(eventBus, times(2)).post(captor.capture());
+            for (PluginMessage message : captor.getAllValues()) {
+                Object urls = message.getData().get("urls");
+                assertTrue(urls instanceof List);
+                assertEquals(1, ((List<?>) urls).size());
+                assertTrue(((List<?>) urls).get(0) instanceof HttpUrl);
+            }
+            assertFalse(appender.list.isEmpty());
+            for (ILoggingEvent event : appender.list) {
+                assertFalse(event.getFormattedMessage().contains(secret),
+                    event.getFormattedMessage());
+                assertFalse(event.getFormattedMessage().contains("discord.com"),
+                    event.getFormattedMessage());
+            }
+        } finally {
+            logger.detachAppender(appender);
+        }
+    }
+
+    /** Changing the field asks before screenshots and the RSN leave for that Discord URL. */
+    @Test
+    void theWebhookSettingWarnsThatScreenshotsAndTheRsnAreSent() throws Exception {
+        ConfigItem item = BingoConfig.class.getMethod("bingoWebhook").getAnnotation(ConfigItem.class);
+        assertNotNull(item);
+        assertTrue(item.secret());
+        assertTrue(item.warning().toLowerCase().contains("screenshot"), item.warning());
+        assertTrue(item.warning().contains("RSN"), item.warning());
+        assertTrue(item.warning().toLowerCase().contains("discord"), item.warning());
+        assertTrue(item.warning().contains("Dink"), item.warning());
     }
 
     // ------------------------------------------------------------------

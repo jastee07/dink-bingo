@@ -68,13 +68,16 @@ Existing sheets must follow the
    Webhook Override*, or this plugin's own *Bingo Webhook Override*).
 3. In Bingo with Dink Notifications: paste the **Backend URL** and **Event Token**.
 4. Press **System check** at the bottom of the sidebar. It reports every link in the chain —
-   backend, token, your name on the `Teams` tab, whether the event is open, and whether Dink
-   and Loot Tracker are running — and names a fix for anything that is wrong. It reads your
-   setup only: no tile is claimed and nothing is written to the sheet.
+   backend, token, your name on the `Teams` tab, whether the event is open, whether Dink
+   and Loot Tracker are running, and whether a **Bingo Webhook Override** will actually be
+   used — and names a fix for anything that is wrong. It reads your setup only: no tile is
+   claimed and nothing is written to the sheet.
 5. Press **Test Dink** at the bottom of the sidebar and confirm the prompt. It posts a
    notification clearly marked as a test, claims nothing, and changes no tile. Nothing
    acknowledges a Dink message, so the plugin only reports that it handed the message over —
-   **seeing it in Discord is the verification**. If it never appears, step 2 is wrong.
+   **seeing it in Discord is the verification**. If the override is not a valid HTTPS URL,
+   the line under the button says it was not used and Dink's own webhook is what gets the
+   message. If it never appears, step 2 is wrong.
 
 The sidebar shows when the board last loaded, so a board that has quietly stopped refreshing
 does not look identical to a current one. `Updated 14:32` means it is live, `Refreshing…` that
@@ -168,7 +171,7 @@ drop. It is rate limited to one test every 30 seconds.
 | Send Screenshot | on | Asks Dink to attach proof; Dink's own *Send Image* policy can still override |
 | Show Verification Overlay | off | Keeps the current local date, time, time zone, and bingo code visible in the game view |
 | Bingo Verification Code | *(blank)* | Organizer-provided code displayed in the overlay; update it for each bingo |
-| Bingo Webhook Override | *(blank)* | Send claims to a specific Discord webhook instead of Dink's default |
+| Bingo Webhook Override | *(blank)* | Send claims to a specific Discord webhook instead of Dink's default. A value that is not HTTPS is ignored, and **System check** says so. Setting it asks for confirmation, because screenshots and your RSN are sent to that Discord URL via Dink. |
 | Progress Message | see config | Used for every distinct item accepted before completion |
 | Completion Message | see config | Used when a contribution reaches the tile threshold |
 | Message tokens | — | `%USERNAME%`, `%ITEM%`, `%TILE%`, `%TEAM%`, `%PROGRESS%`, `%REQUIRED%`, `%REMAINING%`, `%SOURCE%` |

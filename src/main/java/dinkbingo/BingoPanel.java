@@ -529,12 +529,7 @@ public class BingoPanel extends PluginPanel {
         }
         lastTestAt = now;
         testButton.setEnabled(false);
-        // The width hint is what makes a long HTML label wrap instead of clipping in the
-        // fixed-width sidebar.
-        testStatusLabel.setText("<html><body style='width:100%'>Sent to Dink at "
-            + escape(timeFormat.format(now))
-            + ". Dink does not confirm delivery \u2014 check Discord.</body></html>");
-        testStatusLabel.setVisible(true);
+        showTestStatus(false);
 
         Timer reEnable = new Timer((int) TEST_COOLDOWN.toMillis(),
             e -> testButton.setEnabled(true));
@@ -548,6 +543,36 @@ public class BingoPanel extends PluginPanel {
     /** The test line exactly as a player reads it; empty when no test has been sent. */
     String testStatusText() {
         return testStatusLabel.isVisible() ? testStatusLabel.getText() : "";
+    }
+
+    /**
+     * The configured override will not be sent, so the status line has to say so.
+     * <p>
+     * Called on the event dispatch thread from the test handler, which {@link #sendTest}
+     * runs before it returns. The label is owned by that thread. An empty override is not
+     * this case: that leaves the channel to Dink on purpose, and the line stays as it was.
+     */
+    public void noteTestOverrideUnused() {
+        if (lastTestAt == null) {
+            return;
+        }
+        showTestStatus(true);
+    }
+
+    /**
+     * The width hint is what makes a long HTML label wrap instead of clipping in the
+     * fixed-width sidebar.
+     */
+    private void showTestStatus(boolean overrideUnused) {
+        String unused = overrideUnused
+            ? " The Bingo Webhook Override was not used."
+            : "";
+        testStatusLabel.setText("<html><body style='width:100%'>Sent to Dink at "
+            + escape(timeFormat.format(lastTestAt))
+            + ". Dink does not confirm delivery \u2014 check Discord."
+            + unused
+            + "</body></html>");
+        testStatusLabel.setVisible(true);
     }
 
     /**

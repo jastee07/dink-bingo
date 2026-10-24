@@ -53,13 +53,25 @@ final class BingoErrors {
                 + "Tell the organizer if this keeps happening."),
 
         /**
-         * The four reasons that mean the deployment did not understand the request at all.
+         * A claim the backend could read and refused because the player name or the item id
+         * was missing. The current deployment returns this for a null local player or a
+         * non-numeric item id, which is this client's submission, not an old copy of
+         * {@code Code.gs}.
+         */
+        BAD_REQUEST(
+            "bad_request",
+            "The request was missing a player name or item id.",
+            "the claim was missing a player name or item id, so nothing was claimed."),
+
+        /**
+         * The reasons that mean the deployment did not understand the request at all.
          * Marked on the constant rather than listed again in a predicate, so a new one cannot
          * be given wording without also being recognized by
          * {@link BingoErrors#isUnsupportedRequest}.
+         * <p>
+         * {@code bad_request} is deliberately not one of them.
          */
         BAD_JSON("bad_json", REQUEST_BOARD, REQUEST_CLAIM, true),
-        BAD_REQUEST("bad_request", REQUEST_BOARD, REQUEST_CLAIM, true),
         POST_REQUIRED("post_required", REQUEST_BOARD, REQUEST_CLAIM, true),
         UNKNOWN_ACTION("unknown_action", REQUEST_BOARD, REQUEST_CLAIM, true);
 
