@@ -19,12 +19,16 @@ import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -561,6 +565,51 @@ class BingoPluginLifecycleTest {
         testHandler.run();
 
         verify(announcer, never()).announceTest();
+        verify(chatMessageManager, never()).queue(any());
+    }
+
+    /**
+     * Dink reads the client on the thread that delivered the external message. The button
+     * runs on the event dispatch thread, so the post has to be the runnable handed to the
+     * client thread, not work done by the handler that queued it.
+     */
+    @Test
+    void theDinkTestIsPostedOnTheClientThread() throws Exception {
+        when(bingoClient.fetchBoard("Jake")).thenReturn(
+            CompletableFuture.completedFuture(BoardResult.of(board("Current Team"))));
+
+        plugin.startUp();
+
+        List<Runnable> queued = new ArrayList<>();
+        doAnswer(invocation -> {
+            queued.add(invocation.getArgument(0));
+            return null;
+        }).when(clientThread).invokeLater(any(Runnable.class));
+
+        AtomicReference<Thread> postedOn = new AtomicReference<>();
+        doAnswer(invocation -> {
+            postedOn.set(Thread.currentThread());
+            return null;
+        }).when(announcer).announceTest();
+
+        Thread caller = Thread.currentThread();
+        runTestHandler();
+
+        verify(announcer, never()).announceTest();
+        verify(chatMessageManager, never()).queue(any());
+        assertEquals(1, queued.size(), "the test hops to the client thread exactly once");
+
+        Thread client = new Thread(queued.get(0), "client-thread");
+        client.start();
+        client.join();
+
+        verify(announcer).announceTest();
+        assertNotSame(caller, postedOn.get());
+        assertEquals("client-thread", postedOn.get().getName());
+
+        ArgumentCaptor<QueuedMessage> captor = ArgumentCaptor.forClass(QueuedMessage.class);
+        verify(chatMessageManager).queue(captor.capture());
+        assertTrue(captor.getValue().getRuneLiteFormattedMessage().contains("handed to Dink"));
     }
 
     private void runTestHandler() {

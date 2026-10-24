@@ -586,15 +586,22 @@ public class BingoPlugin extends Plugin {
      * The chat line stops at "handed to Dink" on purpose. Nothing acknowledges the message,
      * so claiming delivery here would rebuild the false confidence this feature exists to
      * remove.
+     * <p>
+     * Posted on the client thread, the same hop a real claim takes. Dink reads the client
+     * on the thread that delivered the message and only moves to the client thread for the
+     * screenshot, so a test posted from the button would read the client off the thread
+     * that owns it.
      */
     private void sendDinkTest() {
         if (!active) {
             return;
         }
-        announcer.announceTest();
-        onClientThread(() -> sendChatMessage(
-            "Bingo: test notification handed to Dink. Dink does not confirm delivery "
-                + "\u2014 check Discord to be sure it arrived."));
+        onClientThread(() -> {
+            announcer.announceTest();
+            sendChatMessage(
+                "Bingo: test notification handed to Dink. Dink does not confirm delivery "
+                    + "\u2014 check Discord to be sure it arrived.");
+        });
     }
 
     // ------------------------------------------------------------------
