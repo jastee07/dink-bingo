@@ -180,6 +180,7 @@ one link in that chain.
 | Board | Loaded and live | On screen but no longer refreshing |
 | Claim detection | Drops are being submitted | Suspended after the backend refused a refresh |
 | Dink | Installed and switched on | Missing or off — tiles still count, but nothing is announced |
+| Webhook override | Not set, or a valid HTTPS webhook | Set, but nothing in it is HTTPS, so Dink's own channel is used |
 | Loot Tracker | Installed and switched on | Off, so chest and casket drops are not seen at all |
 
 Every warning and problem carries a one-line fix, and the headline sits on the button itself, so
@@ -216,7 +217,9 @@ labelled a test:
 The chat line stops at *handed to Dink* on purpose. **Seeing the message in Discord is the
 verification** — nothing else confirms delivery. Be logged in if you want to check the
 screenshot, and point the override at a throwaway channel if you would rather not post in the
-event's own.
+event's own. If the override is not a valid HTTPS URL, the line under the button says it was
+not used: the test still goes out, on Dink's own webhook. An empty override leaves that choice
+to Dink, and the line does not mention it.
 
 ---
 
@@ -304,6 +307,7 @@ for it, which is faster than matching a symptom below. The table stays as the re
 | Chat says "your event token was rejected" | The plugin's **Event Token** does not match `token` on the `Config` tab. The drop was not recorded; ask the organizer to reclaim it once the token is fixed. |
 | Chat says "the backend stayed busy" | Every retry hit the script lock. Rare outside a heavy drop burst; tell the organizer if it repeats. |
 | Chat says "that claim id was already used" | One claim id was reused for a different drop. The backend refuses to replay another player's outcome. Harmless once; report it if it repeats. |
+| Chat says "missing a player name or item id" | The claim had no RSN, or the item id was not a number, so nothing was recorded. This is not an out-of-date deployment. Log in, wait for the world to finish loading, and get the drop again. |
 | Chat says "couldn't reach the backend" | No response arrived at all, so nothing was recorded. The same item is submitted again if you get another. |
 | Panel says "Backend error: Claims row N ..." | A `Claims` row credits a tile or item that `Items` no longer lists, usually a manual edit or a mid-event rename. The `Leaderboard` tab's **Claims integrity** cell shows the same thing. Restore the tile/option in `Items`, or remove the row with admin unclaim. Board loads and claims both fail until it is fixed. |
 

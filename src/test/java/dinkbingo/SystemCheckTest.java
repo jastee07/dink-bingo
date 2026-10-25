@@ -52,6 +52,26 @@ class SystemCheckTest {
         assertEquals(SystemCheck.State.NOT_CHECKED, row(check, "Backend version").getState());
     }
 
+    /**
+     * A missing player name or item id is a claim this deployment understood. Reporting it
+     * as a version problem sends the player to redeploy a script that is already current.
+     */
+    @Test
+    void aMissingPlayerNameOrItemIdIsNotAnOutOfDateDeployment() {
+        SystemCheck check = SystemCheck.evaluate(ready()
+            .fetch(SystemStatus.Fetch.REJECTED)
+            .backendError("bad_request")
+            .build());
+
+        assertEquals(SystemCheck.State.NOT_CHECKED, row(check, "Backend version").getState());
+        SystemCheck.Row backend = row(check, "Backend");
+        assertEquals(SystemCheck.State.WARNING, backend.getState());
+        assertTrue(backend.getAction().contains("player name"), backend.getAction());
+        assertTrue(backend.getAction().contains("item id"), backend.getAction());
+        assertFalse(backend.getAction().contains("re-deploy"), backend.getAction());
+        assertFalse(backend.getAction().toLowerCase().contains("out of date"), backend.getAction());
+    }
+
     /** An Apps Script left on an old copy of Code.gs, which reads as a broken token otherwise. */
     @Test
     void aDeploymentThatDoesNotUnderstandTheRequestIsReportedAsAVersionProblem() {
@@ -206,6 +226,51 @@ class SystemCheckTest {
         }
     }
 
+    /**
+     * A non-empty override that yields no HTTPS url is dropped, and Dink then uses its own
+     * channel. The row has to say both, or the player believes the event channel got it.
+     */
+    @Test
+    void anOverrideThatProducesNoHttpsUrlWarnsAndSaysWhatToDo() {
+        SystemCheck check = SystemCheck.evaluate(ready()
+            .webhookOverride(SystemStatus.WebhookOverride.IGNORED)
+            .build());
+
+        SystemCheck.Row webhook = row(check, "Webhook override");
+        assertEquals(SystemCheck.State.WARNING, webhook.getState());
+        assertTrue(webhook.getDetail().toLowerCase().contains("not be used"), webhook.getDetail());
+        assertNotNull(webhook.getAction());
+        assertTrue(webhook.getAction().contains("HTTPS"), webhook.getAction());
+        assertTrue(webhook.getAction().contains("Dink"), webhook.getAction());
+        assertFalse(webhook.getDetail().contains("discord.com"), webhook.getDetail());
+        assertFalse(webhook.getAction().contains("discord.com/api"), webhook.getAction());
+        assertEquals(SystemCheck.State.WARNING, check.getState());
+    }
+
+    /** Nothing configured is the normal setup: Dink's own override or primary url decides. */
+    @Test
+    void anEmptyOverrideLeavesTheChannelToDink() {
+        SystemCheck.Row webhook = row(SystemCheck.evaluate(ready()
+            .webhookOverride(SystemStatus.WebhookOverride.UNSET)
+            .build()), "Webhook override");
+
+        assertEquals(SystemCheck.State.READY, webhook.getState());
+        assertTrue(webhook.getDetail().contains("Dink"), webhook.getDetail());
+        assertTrue(webhook.getDetail().toLowerCase().contains("not set"), webhook.getDetail());
+    }
+
+    /** A usable override is reported as used, and the URL itself never reaches the report. */
+    @Test
+    void aValidOverrideIsReportedWithoutTheUrl() {
+        SystemCheck.Row webhook = row(SystemCheck.evaluate(ready()
+            .webhookOverride(SystemStatus.WebhookOverride.SET)
+            .build()), "Webhook override");
+
+        assertEquals(SystemCheck.State.READY, webhook.getState());
+        assertTrue(webhook.getDetail().toLowerCase().contains("used"), webhook.getDetail());
+        assertFalse(webhook.getDetail().contains("http"), webhook.getDetail());
+    }
+
     /** A running Dink still cannot be called proven, because Dink acknowledges nothing. */
     @Test
     void aRunningDinkPointsAtTheSettingAndTheTestRatherThanClaimingDelivery() {
@@ -302,6 +367,7 @@ class SystemCheckTest {
             ready().dink(SystemStatus.Presence.MISSING).build(),
             ready().lootTracker(SystemStatus.Presence.DISABLED).build(),
             ready().loggedIn(false).rsn(null).board(null).build(),
+            ready().webhookOverride(SystemStatus.WebhookOverride.IGNORED).build(),
         };
         for (SystemStatus status : broken) {
             for (SystemCheck.Row row : SystemCheck.evaluate(status).getRows()) {

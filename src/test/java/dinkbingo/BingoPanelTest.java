@@ -235,6 +235,27 @@ class BingoPanelTest {
         assertTrue(status.contains("does not confirm delivery"), status);
         assertTrue(status.contains("check Discord"), status);
         assertFalse(status.toLowerCase().contains("delivered"), status);
+        // The handler did not report a dropped override, so the line must not invent one.
+        assertFalse(status.contains("was not used"), status);
+    }
+
+    /** A non-HTTPS override is dropped, and the line under the button is where the player looks. */
+    @Test
+    void theTestStatusSaysWhenTheWebhookOverrideWasNotUsed() throws Exception {
+        ItemManager itemManager = mock(ItemManager.class);
+        when(itemManager.getImage(anyInt())).thenReturn(mock(AsyncBufferedImage.class));
+        BingoPanel panel = new BingoPanel(itemManager);
+        panel.setClock(Clock.fixed(Instant.parse("2026-09-15T14:32:00Z"), ZoneOffset.UTC));
+        panel.setTestHandler(panel::noteTestOverrideUnused);
+
+        assertTrue(invokeSendTest(panel));
+        String status = panel.testStatusText();
+        assertTrue(status.contains("was not used"), status);
+        assertTrue(status.contains("Bingo Webhook Override"), status);
+        assertTrue(status.contains("Sent to Dink"), status);
+        assertTrue(status.contains("does not confirm delivery"), status);
+        assertTrue(status.contains("check Discord"), status);
+        assertFalse(status.toLowerCase().contains("delivered"), status);
     }
 
     /**

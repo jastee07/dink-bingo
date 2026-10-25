@@ -20,8 +20,12 @@ class BingoErrorsTest {
             "a rejected token must point at the setting that is wrong");
         assertTrue(BingoErrors.describeClaimError("lock_timeout").contains("busy"));
         assertTrue(BingoErrors.describeClaimError("claim_id_conflict").contains("claim id"));
-        assertTrue(BingoErrors.describeClaimError("bad_request").contains("Apps Script"),
-            "a malformed request is nearly always an outdated deployment");
+        String badRequest = BingoErrors.describeClaimError("bad_request");
+        assertTrue(badRequest.contains("missing a player name or item id"), badRequest);
+        assertTrue(badRequest.contains("nothing was claimed"), badRequest);
+        assertFalse(badRequest.contains("Apps Script"),
+            "a missing name or item id is not an out-of-date deployment: " + badRequest);
+        assertFalse(badRequest.toLowerCase().contains("out of date"), badRequest);
 
         // Whatever the reason, the player is told plainly that the drop did not count.
         for (String code : new String[] {"bad_token", "lock_timeout", "claim_id_conflict",
@@ -43,6 +47,25 @@ class BingoErrorsTest {
                 code + " must be a recognized reason on the board path too");
             assertFalse(BingoErrors.describeClaimError(code).contains("refused the claim: "),
                 code + " must be a recognized reason on the claim path too");
+        }
+        String board = BingoErrors.describeBoardError("bad_request");
+        assertTrue(board.contains("player name"), board);
+        assertTrue(board.contains("item id"), board);
+        assertFalse(board.contains("Apps Script"), board);
+    }
+
+    /**
+     * {@code bad_json}, {@code post_required}, and {@code unknown_action} are a deployment
+     * that does not speak this client's protocol. {@code bad_request} is a claim this
+     * deployment understood and refused, so it must not send the player off to redeploy.
+     */
+    @Test
+    void badRequestIsNotAnUnsupportedDeployment() {
+        assertFalse(BingoErrors.isUnsupportedRequest("bad_request"));
+        for (String code : new String[] {"bad_json", "post_required", "unknown_action"}) {
+            assertTrue(BingoErrors.isUnsupportedRequest(code), code);
+            assertTrue(BingoErrors.describeClaimError(code).contains("out of date"), code);
+            assertTrue(BingoErrors.describeBoardError(code).contains("Apps Script"), code);
         }
     }
 

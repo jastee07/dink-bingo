@@ -178,7 +178,9 @@ public interface BingoConfig extends Config {
         keyName = "bingoWebhook",
         name = "Bingo Webhook Override",
         description = "If non-empty, bingo updates are sent to this Discord webhook.<br/>" +
-            "Otherwise Dink's 'External Webhook Override' (or primary URL) is used",
+            "Otherwise Dink's 'External Webhook Override' (or primary URL) is used.<br/>" +
+            "A value that is not an HTTPS URL is ignored.",
+        warning = "Screenshots and your RSN are sent to that Discord URL via Dink.",
         position = 24,
         section = announceSection,
         secret = true
