@@ -46,7 +46,7 @@ dependencies {
     }
 
     // okhttp is provided by the runelite client at runtime; mockwebserver is test-only
-    testImplementation(group = "com.squareup.okhttp3", name = "mockwebserver", version = "5.5.0")
+    testImplementation(group = "com.squareup.okhttp3", name = "mockwebserver", version = "5.5.1")
 }
 
 group = "dinkbingo"
